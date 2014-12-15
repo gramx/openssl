@@ -371,8 +371,6 @@ int ssl3_change_cipher_state(SSL *s, int which)
 			}
 		}
 
-	s->session->key_arg_length=0;
-
 	EVP_CipherInit_ex(dd,c,NULL,key,iv,(which & SSL3_CC_WRITE));
 
 #ifdef OPENSSL_SSL_TRACE_CRYPTO
@@ -556,7 +554,8 @@ int ssl3_enc(SSL *s, int send)
 			/* otherwise, rec->length >= bs */
 			}
 		
-		EVP_Cipher(ds,rec->data,rec->input,l);
+		if(EVP_Cipher(ds,rec->data,rec->input,l) < 1)
+			return -1;
 
 		if (EVP_MD_CTX_md(s->read_hash) != NULL)
 			mac_size = EVP_MD_CTX_size(s->read_hash);
@@ -617,6 +616,11 @@ int ssl3_digest_cached_records(SSL *s)
 	/* Allocate handshake_dgst array */
 	ssl3_free_digest_list(s);
 	s->s3->handshake_dgst = OPENSSL_malloc(SSL_MAX_DIGEST * sizeof(EVP_MD_CTX *));
+	if (s->s3->handshake_dgst == NULL)
+		{
+		SSLerr(SSL_F_SSL3_DIGEST_CACHED_RECORDS, ERR_R_MALLOC_FAILURE);
+		return 0;
+		}
 	memset(s->s3->handshake_dgst,0,SSL_MAX_DIGEST *sizeof(EVP_MD_CTX *));
 	hdatalen = BIO_get_mem_data(s->s3->handshake_buffer,&hdata);
 	if (hdatalen <= 0)
@@ -631,13 +635,11 @@ int ssl3_digest_cached_records(SSL *s)
 		if ((mask & ssl_get_algorithm2(s)) && md) 
 			{
 			s->s3->handshake_dgst[i]=EVP_MD_CTX_create();
-#ifdef OPENSSL_FIPS
 			if (EVP_MD_nid(md) == NID_md5)
 				{
 				EVP_MD_CTX_set_flags(s->s3->handshake_dgst[i],
 						EVP_MD_CTX_FLAG_NON_FIPS_ALLOW);
 				}
-#endif
 			EVP_DigestInit_ex(s->s3->handshake_dgst[i],md,NULL);
 			EVP_DigestUpdate(s->s3->handshake_dgst[i],hdata,hdatalen);
 			} 

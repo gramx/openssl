@@ -67,7 +67,7 @@
  *
  */
 
-#define OPENSSL_FIPSAPI
+
 
 #include <string.h>
 #include <limits.h>
@@ -118,14 +118,6 @@ static int ecdh_compute_key(void *out, size_t outlen, const EC_POINT *pub_key,
 	int ret= -1;
 	size_t buflen, len;
 	unsigned char *buf=NULL;
-
-#ifdef OPENSSL_FIPS
-	if(FIPS_selftest_failed())
-		{
-		FIPSerr(FIPS_F_ECDH_COMPUTE_KEY,FIPS_R_FIPS_SELFTEST_FAILED);
-		return -1;
-		}
-#endif
 
 	if (outlen > INT_MAX)
 		{
@@ -234,15 +226,3 @@ err:
 	if (buf) OPENSSL_free(buf);
 	return(ret);
 	}
-
-#ifdef OPENSSL_FIPSCANISTER
-/* FIPS stanadlone version of ecdh_check: just return FIPS method */
-ECDH_DATA *fips_ecdh_check(EC_KEY *key)
-	{
-	static ECDH_DATA rv = {
-		0,0,0,
-		&openssl_ecdh_meth
-		};
-	return &rv;
-	}
-#endif

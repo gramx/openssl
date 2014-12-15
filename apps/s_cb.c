@@ -621,8 +621,6 @@ static const char *ssl_version_str(int version)
 	{
 	switch (version)
 		{
-	case SSL2_VERSION:
-		return "SSL 2.0";
 	case SSL3_VERSION:
 		return "SSL 3.0";
 	case TLS1_VERSION:
@@ -648,67 +646,6 @@ void MS_CALLBACK msg_cb(int write_p, int version, int content_type, const void *
 	str_write_p = write_p ? ">>>" : "<<<";
 
 	str_version = ssl_version_str(version);
-
-	if (version == SSL2_VERSION)
-		{
-		str_details1 = "???";
-
-		if (len > 0)
-			{
-			switch (((const unsigned char*)buf)[0])
-				{
-				case 0:
-					str_details1 = ", ERROR:";
-					str_details2 = " ???";
-					if (len >= 3)
-						{
-						unsigned err = (((const unsigned char*)buf)[1]<<8) + ((const unsigned char*)buf)[2];
-						
-						switch (err)
-							{
-						case 0x0001:
-							str_details2 = " NO-CIPHER-ERROR";
-							break;
-						case 0x0002:
-							str_details2 = " NO-CERTIFICATE-ERROR";
-							break;
-						case 0x0004:
-							str_details2 = " BAD-CERTIFICATE-ERROR";
-							break;
-						case 0x0006:
-							str_details2 = " UNSUPPORTED-CERTIFICATE-TYPE-ERROR";
-							break;
-							}
-						}
-
-					break;
-				case 1:
-					str_details1 = ", CLIENT-HELLO";
-					break;
-				case 2:
-					str_details1 = ", CLIENT-MASTER-KEY";
-					break;
-				case 3:
-					str_details1 = ", CLIENT-FINISHED";
-					break;
-				case 4:
-					str_details1 = ", SERVER-HELLO";
-					break;
-				case 5:
-					str_details1 = ", SERVER-VERIFY";
-					break;
-				case 6:
-					str_details1 = ", SERVER-FINISHED";
-					break;
-				case 7:
-					str_details1 = ", REQUEST-CERTIFICATE";
-					break;
-				case 8:
-					str_details1 = ", CLIENT-CERTIFICATE";
-					break;
-				}
-			}
-		}
 
 	if (version == SSL3_VERSION ||
 	    version == TLS1_VERSION ||
@@ -1255,7 +1192,7 @@ struct chain_flags chain_flags_list[] =
 	};
 
 
-static void print_chain_flags(BIO *out, int flags)
+static void print_chain_flags(BIO *out, SSL *s, int flags)
 	{
 	struct chain_flags *ctmp = chain_flags_list;
 	while(ctmp->name)
@@ -1264,6 +1201,11 @@ static void print_chain_flags(BIO *out, int flags)
 				flags & ctmp->flag ? "OK" : "NOT OK");
 		ctmp++;
 		}
+	BIO_printf(out, "\tSuite B: ");
+	if (SSL_set_cert_flags(s, 0) & SSL_CERT_FLAG_SUITEB_128_LOS)
+		BIO_puts(out, flags & CERT_PKEY_SUITEB ? "OK\n" : "NOT OK\n");
+	else
+		BIO_printf(out, "not tested\n");
 	}
 
 /* Very basic selection callback: just use any certificate chain
@@ -1306,7 +1248,7 @@ static int set_cert_cb(SSL *ssl, void *arg)
 							XN_FLAG_ONELINE);
 		BIO_puts(bio_err, "\n");
 		
-		print_chain_flags(bio_err, rv);
+		print_chain_flags(bio_err, ssl, rv);
 		if (rv & CERT_PKEY_VALID)
 			{
 			SSL_use_certificate(ssl, exc->cert);
@@ -1407,9 +1349,15 @@ int load_excert(SSL_EXCERT **pexc, BIO *err)
 		if (!exc->cert)
 			return 0;
 		if (exc->keyfile)
-			exc->keyfile = exc->certfile;
-		exc->key = load_key(err, exc->certfile, exc->certform, 0,
-					NULL, NULL, "Server Certificate");
+			{
+			exc->key = load_key(err, exc->keyfile, exc->keyform,
+					    0, NULL, NULL, "Server Key");
+			}
+		else
+			{
+			exc->key = load_key(err, exc->certfile, exc->certform,
+					    0, NULL, NULL, "Server Key");
+			}
 		if (!exc->key)
 			return 0;
 		if (exc->chainfile)
@@ -1418,7 +1366,7 @@ int load_excert(SSL_EXCERT **pexc, BIO *err)
 						exc->chainfile, FORMAT_PEM,
 						NULL, NULL,
 						"Server Chain");
-			if (!exc->chainfile)
+			if (!exc->chain)
 				return 0;
 			}
 		}
@@ -1817,11 +1765,6 @@ static int security_callback_debug(SSL *s, SSL_CTX *ctx,
 		break;
 	case SSL_SECOP_CURVE_CHECK:
 		nm = "Check Curve";
-		break;
-	case SSL_SECOP_SSL2_COMPAT:
-		BIO_puts(sdb->out, "SSLv2 compatible");
-		show_bits = 0;
-		nm = NULL;
 		break;
 	case SSL_SECOP_VERSION:
 		BIO_printf(sdb->out, "Version=%s", ssl_version_str(nid));

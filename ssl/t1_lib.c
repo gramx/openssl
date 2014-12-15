@@ -312,7 +312,7 @@ static const unsigned char suiteb_curves[] =
 
 int tls1_ec_curve_id2nid(int curve_id)
 	{
-	/* ECC curves from draft-ietf-tls-ecc-12.txt (Oct. 17, 2005) */
+	/* ECC curves from RFC 4492 and RFC 7027 */
 	if ((curve_id < 1) || ((unsigned int)curve_id >
 				sizeof(nid_list)/sizeof(nid_list[0])))
 		return 0;
@@ -321,7 +321,7 @@ int tls1_ec_curve_id2nid(int curve_id)
 
 int tls1_ec_nid2curve_id(int nid)
 	{
-	/* ECC curves from draft-ietf-tls-ecc-12.txt (Oct. 17, 2005) */
+	/* ECC curves from RFC 4492 and RFC 7027 */
 	switch (nid)
 		{
 	case NID_sect163k1: /* sect163k1 (1) */
@@ -384,44 +384,69 @@ int tls1_ec_nid2curve_id(int nid)
 		return 0;
 		}
 	}
-/* Get curves list, if "sess" is set return client curves otherwise
- * preferred list
+/*
+ * Get curves list, if "sess" is set return client curves otherwise
+ * preferred list.
+ * Sets |num_curves| to the number of curves in the list, i.e.,
+ * the length of |pcurves| is 2 * num_curves.
+ * Returns 1 on success and 0 if the client curves list has invalid format.
+ * The latter indicates an internal error: we should not be accepting such
+ * lists in the first place.
+ * TODO(emilia): we should really be storing the curves list in explicitly
+ * parsed form instead. (However, this would affect binary compatibility
+ * so cannot happen in the 1.0.x series.)
  */
-static void tls1_get_curvelist(SSL *s, int sess,
+static int tls1_get_curvelist(SSL *s, int sess,
 					const unsigned char **pcurves,
-					size_t *pcurveslen)
+					size_t *num_curves)
 	{
+	size_t pcurveslen = 0;
 	if (sess)
 		{
 		*pcurves = s->session->tlsext_ellipticcurvelist;
-		*pcurveslen = s->session->tlsext_ellipticcurvelist_length;
-		return;
+		pcurveslen = s->session->tlsext_ellipticcurvelist_length;
 		}
-	/* For Suite B mode only include P-256, P-384 */
-	switch (tls1_suiteb(s))
+	else
 		{
-	case SSL_CERT_FLAG_SUITEB_128_LOS:
-		*pcurves = suiteb_curves;
-		*pcurveslen = sizeof(suiteb_curves);
-		break;
+		/* For Suite B mode only include P-256, P-384 */
+		switch (tls1_suiteb(s))
+			{
+		case SSL_CERT_FLAG_SUITEB_128_LOS:
+			*pcurves = suiteb_curves;
+			pcurveslen = sizeof(suiteb_curves);
+			break;
 
-	case SSL_CERT_FLAG_SUITEB_128_LOS_ONLY:
-		*pcurves = suiteb_curves;
-		*pcurveslen = 2;
-		break;
+		case SSL_CERT_FLAG_SUITEB_128_LOS_ONLY:
+			*pcurves = suiteb_curves;
+			pcurveslen = 2;
+			break;
 
-	case SSL_CERT_FLAG_SUITEB_192_LOS:
-		*pcurves = suiteb_curves + 2;
-		*pcurveslen = 2;
-		break;
-	default:
-		*pcurves = s->tlsext_ellipticcurvelist;
-		*pcurveslen = s->tlsext_ellipticcurvelist_length;
+		case SSL_CERT_FLAG_SUITEB_192_LOS:
+			*pcurves = suiteb_curves + 2;
+			pcurveslen = 2;
+			break;
+		default:
+			*pcurves = s->tlsext_ellipticcurvelist;
+			pcurveslen = s->tlsext_ellipticcurvelist_length;
+			}
+		if (!*pcurves)
+			{
+			*pcurves = eccurves_default;
+			pcurveslen = sizeof(eccurves_default);
+			}
 		}
-	if (!*pcurves)
+
+	/* We do not allow odd length arrays to enter the system. */
+	if (pcurveslen & 1)
 		{
-		*pcurves = eccurves_default;
-		*pcurveslen = sizeof(eccurves_default);
+		SSLerr(SSL_F_TLS1_GET_CURVELIST, ERR_R_INTERNAL_ERROR);
+		*num_curves = 0;
+		return 0;
+		}
+	else
+		{
+		*num_curves = pcurveslen / 2;
+		return 1;
 		}
 	}
 
@@ -435,6 +460,10 @@ static int tls_curve_allowed(SSL *s, const unsigned char *curve, int op)
 				sizeof(nid_list)/sizeof(nid_list[0])))
 		return 0;
 	cinfo = &nid_list[curve[1]-1];
+#ifdef OPENSSL_NO_EC2M
+	if (cinfo->flags & TLS_CURVE_CHAR2)
+		return 0;
+#endif
 	return ssl_security(s, op, cinfo->secbits, cinfo->nid, (void *)curve);
 	}
 
@@ -442,7 +471,7 @@ static int tls_curve_allowed(SSL *s, const unsigned char *curve, int op)
 int tls1_check_curve(SSL *s, const unsigned char *p, size_t len)
 	{
 	const unsigned char *curves;
-	size_t curveslen, i;
+	size_t num_curves, i;
 	unsigned int suiteb_flags = tls1_suiteb(s);
 	if (len != 3 || p[0] != NAMED_CURVE_TYPE)
 		return 0;
@@ -465,8 +494,9 @@ int tls1_check_curve(SSL *s, const unsigned char *p, size_t len)
 		else	/* Should never happen */
 			return 0;
 		}
-	tls1_get_curvelist(s, 0, &curves, &curveslen);
-	for (i = 0; i < curveslen; i += 2, curves += 2)
+	if (!tls1_get_curvelist(s, 0, &curves, &num_curves))
+		return 0;
+	for (i = 0; i < num_curves; i++, curves += 2)
 		{
 		if (p[1] == curves[0] && p[2] == curves[1])
 			return tls_curve_allowed(s, p + 1, SSL_SECOP_CURVE_CHECK);
@@ -474,15 +504,16 @@ int tls1_check_curve(SSL *s, const unsigned char *p, size_t len)
 	return 0;
 	}
 
-/* Return nth shared curve. If nmatch == -1 return number of
- * matches. For nmatch == -2 return the NID of the curve to use for
- * an EC tmp key.
+/*
+ * Return |nmatch|th shared curve or NID_undef if there is no match.
+ * For nmatch == -1, return number of  matches
+ * For nmatch == -2, return the NID of the curve to use for
+ * an EC tmp key, or NID_undef if there is no match.
  */
-
 int tls1_shared_curve(SSL *s, int nmatch)
 	{
 	const unsigned char *pref, *supp;
-	size_t preflen, supplen, i, j;
+	size_t num_pref, num_supp, i, j;
 	int k;
 	/* Can't do anything on client side */
 	if (s->server == 0)
@@ -506,17 +537,22 @@ int tls1_shared_curve(SSL *s, int nmatch)
 		/* If not Suite B just return first preference shared curve */
 		nmatch = 0;
 		}
-	tls1_get_curvelist(s, !!(s->options & SSL_OP_CIPHER_SERVER_PREFERENCE),
-				&supp, &supplen);
-	tls1_get_curvelist(s, !(s->options & SSL_OP_CIPHER_SERVER_PREFERENCE),
-				&pref, &preflen);
-	preflen /= 2;
-	supplen /= 2;
+	/*
+	 * Avoid truncation. tls1_get_curvelist takes an int
+	 * but s->options is a long...
+	 */
+	if (!tls1_get_curvelist(s, (s->options & SSL_OP_CIPHER_SERVER_PREFERENCE) != 0,
+			&supp, &num_supp))
+		/* In practice, NID_undef == 0 but let's be precise. */
+		return nmatch == -1 ? 0 : NID_undef;
+	if(!tls1_get_curvelist(s, !(s->options & SSL_OP_CIPHER_SERVER_PREFERENCE),
+			&pref, &num_pref))
+		return nmatch == -1 ? 0 : NID_undef;
 	k = 0;
-	for (i = 0; i < preflen; i++, pref+=2)
+	for (i = 0; i < num_pref; i++, pref+=2)
 		{
 		const unsigned char *tsupp = supp;
-		for (j = 0; j < supplen; j++, tsupp+=2)
+		for (j = 0; j < num_supp; j++, tsupp+=2)
 			{
 			if (pref[0] == tsupp[0] && pref[1] == tsupp[1])
 				{
@@ -533,7 +569,8 @@ int tls1_shared_curve(SSL *s, int nmatch)
 		}
 	if (nmatch == -1)
 		return k;
-	return 0;
+	/* Out of range (nmatch > k). */
+	return NID_undef;
 	}
 
 int tls1_set_curves(unsigned char **pext, size_t *pextlen,
@@ -671,22 +708,22 @@ static int tls1_set_ec_id(unsigned char *curve_id, unsigned char *comp_id,
 static int tls1_check_ec_key(SSL *s,
 			unsigned char *curve_id, unsigned char *comp_id)
 	{
-	const unsigned char *p;
-	size_t plen, i;
+	const unsigned char *pformats, *pcurves;
+	size_t num_formats, num_curves, i;
 	int j;
 	/* If point formats extension present check it, otherwise everything
 	 * is supported (see RFC4492).
 	 */
 	if (comp_id && s->session->tlsext_ecpointformatlist)
 		{
-		p = s->session->tlsext_ecpointformatlist;
-		plen = s->session->tlsext_ecpointformatlist_length;
-		for (i = 0; i < plen; i++, p++)
+		pformats = s->session->tlsext_ecpointformatlist;
+		num_formats = s->session->tlsext_ecpointformatlist_length;
+		for (i = 0; i < num_formats; i++, pformats++)
 			{
-			if (*comp_id == *p)
+			if (*comp_id == *pformats)
 				break;
 			}
-		if (i == plen)
+		if (i == num_formats)
 			return 0;
 		}
 	if (!curve_id)
@@ -694,13 +731,15 @@ static int tls1_check_ec_key(SSL *s,
 	/* Check curve is consistent with client and server preferences */
 	for (j = 0; j <= 1; j++)
 		{
-		tls1_get_curvelist(s, j, &p, &plen);
-		for (i = 0; i < plen; i+=2, p+=2)
+		if (!tls1_get_curvelist(s, j, &pcurves, &num_curves))
+			return 0;
+		for (i = 0; i < num_curves; i++, pcurves += 2)
 			{
-			if (p[0] == curve_id[0] && p[1] == curve_id[1])
+			if (pcurves[0] == curve_id[0] &&
+			    pcurves[1] == curve_id[1])
 				break;
 			}
-		if (i == plen)
+		if (i == num_curves)
 			return 0;
 		/* For clients can only check sent curve list */
 		if (!s->server)
@@ -710,23 +749,23 @@ static int tls1_check_ec_key(SSL *s,
 	}
 
 static void tls1_get_formatlist(SSL *s, const unsigned char **pformats,
-					size_t *pformatslen)
+					size_t *num_formats)
 	{
 	/* If we have a custom point format list use it otherwise
 	 * use default */
 	if (s->tlsext_ecpointformatlist)
 		{
 		*pformats = s->tlsext_ecpointformatlist;
-		*pformatslen = s->tlsext_ecpointformatlist_length;
+		*num_formats = s->tlsext_ecpointformatlist_length;
 		}
 	else
 		{
 		*pformats = ecformats_default;
 		/* For Suite B we don't support char2 fields */
 		if (tls1_suiteb(s))
-			*pformatslen = sizeof(ecformats_default) - 1;
+			*num_formats = sizeof(ecformats_default) - 1;
 		else
-			*pformatslen = sizeof(ecformats_default);
+			*num_formats = sizeof(ecformats_default);
 		}
 	}
 
@@ -1143,14 +1182,37 @@ unsigned char *ssl_add_clienthello_tlsext(SSL *s, unsigned char *buf, unsigned c
 		}
 #endif
 
-	/* don't add extensions for SSLv3 unless doing secure renegotiation */
-	if (s->client_version == SSL3_VERSION
-					&& !s->s3->send_connection_binding)
-		return orig;
-
 	ret+=2;
 
 	if (ret>=limit) return NULL; /* this really never occurs, but ... */
+
+        /* Add RI if renegotiating */
+        if (s->renegotiate)
+          {
+          int el;
+
+          if(!ssl_add_clienthello_renegotiate_ext(s, 0, &el, 0))
+              {
+              SSLerr(SSL_F_SSL_ADD_CLIENTHELLO_TLSEXT, ERR_R_INTERNAL_ERROR);
+              return NULL;
+              }
+
+          if((limit - ret - 4 - el) < 0) return NULL;
+
+          s2n(TLSEXT_TYPE_renegotiate,ret);
+          s2n(el,ret);
+
+          if(!ssl_add_clienthello_renegotiate_ext(s, ret, &el, el))
+              {
+              SSLerr(SSL_F_SSL_ADD_CLIENTHELLO_TLSEXT, ERR_R_INTERNAL_ERROR);
+              return NULL;
+              }
+
+          ret += el;
+        }
+	/* Only add RI for SSLv3 */
+	if (s->client_version == SSL3_VERSION)
+		goto done;
 
  	if (s->tlsext_hostname != NULL)
 		{ 
@@ -1183,31 +1245,6 @@ unsigned char *ssl_add_clienthello_tlsext(SSL *s, unsigned char *buf, unsigned c
 		memcpy(ret, s->tlsext_hostname, size_str);
 		ret+=size_str;
 		}
-
-        /* Add RI if renegotiating */
-        if (s->renegotiate)
-          {
-          int el;
-          
-          if(!ssl_add_clienthello_renegotiate_ext(s, 0, &el, 0))
-              {
-              SSLerr(SSL_F_SSL_ADD_CLIENTHELLO_TLSEXT, ERR_R_INTERNAL_ERROR);
-              return NULL;
-              }
-
-          if((limit - ret - 4 - el) < 0) return NULL;
-          
-          s2n(TLSEXT_TYPE_renegotiate,ret);
-          s2n(el,ret);
-
-          if(!ssl_add_clienthello_renegotiate_ext(s, ret, &el, el))
-              {
-              SSLerr(SSL_F_SSL_ADD_CLIENTHELLO_TLSEXT, ERR_R_INTERNAL_ERROR);
-              return NULL;
-              }
-
-          ret += el;
-        }
 
 #ifndef OPENSSL_NO_SRP
 	/* Add SRP username if there is one */
@@ -1242,34 +1279,36 @@ unsigned char *ssl_add_clienthello_tlsext(SSL *s, unsigned char *buf, unsigned c
 		{
 		/* Add TLS extension ECPointFormats to the ClientHello message */
 		long lenmax; 
-		const unsigned char *plist;
-		size_t plistlen;
+		const unsigned char *pcurves, *pformats;
+		size_t num_curves, num_formats, curves_list_len;
 		size_t i;
 		unsigned char *etmp;
 
-		tls1_get_formatlist(s, &plist, &plistlen);
+		tls1_get_formatlist(s, &pformats, &num_formats);
 
 		if ((lenmax = limit - ret - 5) < 0) return NULL; 
-		if (plistlen > (size_t)lenmax) return NULL;
-		if (plistlen > 255)
+		if (num_formats > (size_t)lenmax) return NULL;
+		if (num_formats > 255)
 			{
 			SSLerr(SSL_F_SSL_ADD_CLIENTHELLO_TLSEXT, ERR_R_INTERNAL_ERROR);
 			return NULL;
 			}
 		
 		s2n(TLSEXT_TYPE_ec_point_formats,ret);
-		s2n(plistlen + 1,ret);
-		*(ret++) = (unsigned char)plistlen ;
-		memcpy(ret, plist, plistlen);
-		ret+=plistlen;
+		/* The point format list has 1-byte length. */
+		s2n(num_formats + 1,ret);
+		*(ret++) = (unsigned char)num_formats ;
+		memcpy(ret, pformats, num_formats);
+		ret+=num_formats;
 
 		/* Add TLS extension EllipticCurves to the ClientHello message */
-		plist = s->tlsext_ellipticcurvelist;
-		tls1_get_curvelist(s, 0, &plist, &plistlen);
+		pcurves = s->tlsext_ellipticcurvelist;
+		if (!tls1_get_curvelist(s, 0, &pcurves, &num_curves))
+			return NULL;
 
 		if ((lenmax = limit - ret - 6) < 0) return NULL; 
-		if (plistlen > (size_t)lenmax) return NULL;
-		if (plistlen > 65532)
+		if (num_curves > (size_t)lenmax / 2) return NULL;
+		if (num_curves > 65532 / 2)
 			{
 			SSLerr(SSL_F_SSL_ADD_CLIENTHELLO_TLSEXT, ERR_R_INTERNAL_ERROR);
 			return NULL;
@@ -1279,25 +1318,20 @@ unsigned char *ssl_add_clienthello_tlsext(SSL *s, unsigned char *buf, unsigned c
 		s2n(TLSEXT_TYPE_elliptic_curves,ret);
 		etmp = ret + 4;
 		/* Copy curve ID if supported */
-		for (i = 0; i < plistlen; i += 2, plist += 2)
+		for (i = 0; i < num_curves; i++, pcurves += 2)
 			{
-			if (tls_curve_allowed(s, plist, SSL_SECOP_CURVE_SUPPORTED))
+			if (tls_curve_allowed(s, pcurves, SSL_SECOP_CURVE_SUPPORTED))
 				{
-				*etmp++ = plist[0];
-				*etmp++ = plist[1];
+				*etmp++ = pcurves[0];
+				*etmp++ = pcurves[1];
 				}
 			}
 
-		plistlen = etmp - ret - 4;
+		curves_list_len = etmp - ret - 4;
 
-		/* NB: draft-ietf-tls-ecc-12.txt uses a one-byte prefix for
-		 * elliptic_curve_list, but the examples use two bytes.
-		 * http://www1.ietf.org/mail-archive/web/tls/current/msg00538.html
-		 * resolves this to two bytes.
-		 */
-		s2n(plistlen + 2, ret);
-		s2n(plistlen, ret);
-		ret+=plistlen;
+		s2n(curves_list_len + 2, ret);
+		s2n(curves_list_len, ret);
+		ret += curves_list_len;
 		}
 #endif /* OPENSSL_NO_EC */
 
@@ -1485,11 +1519,8 @@ unsigned char *ssl_add_clienthello_tlsext(SSL *s, unsigned char *buf, unsigned c
 	if (!custom_ext_add(s, 0, &ret, limit, al))
 		return NULL;
 #ifdef TLSEXT_TYPE_encrypt_then_mac
-	if (s->version != SSL3_VERSION)
-		{
-		s2n(TLSEXT_TYPE_encrypt_then_mac,ret);
-		s2n(0,ret);
-		}
+	s2n(TLSEXT_TYPE_encrypt_then_mac,ret);
+	s2n(0,ret);
 #endif
 
 	/* Add padding to workaround bugs in F5 terminators.
@@ -1522,6 +1553,8 @@ unsigned char *ssl_add_clienthello_tlsext(SSL *s, unsigned char *buf, unsigned c
 			}
 		}
 
+	done:
+
 	if ((extdatalen = ret-orig-2)== 0) 
 		return orig;
 
@@ -1543,20 +1576,9 @@ unsigned char *ssl_add_serverhello_tlsext(SSL *s, unsigned char *buf, unsigned c
 	int using_ecc = (alg_k & (SSL_kECDHE|SSL_kECDHr|SSL_kECDHe)) || (alg_a & SSL_aECDSA);
 	using_ecc = using_ecc && (s->session->tlsext_ecpointformatlist != NULL);
 #endif
-	/* don't add extensions for SSLv3, unless doing secure renegotiation */
-	if (s->version == SSL3_VERSION && !s->s3->send_connection_binding)
-		return orig;
 	
 	ret+=2;
 	if (ret>=limit) return NULL; /* this really never occurs, but ... */
-
-	if (!s->hit && s->servername_done == 1 && s->session->tlsext_hostname != NULL)
-		{ 
-		if ((long)(limit - ret - 4) < 0) return NULL; 
-
-		s2n(TLSEXT_TYPE_server_name,ret);
-		s2n(0,ret);
-		}
 
 	if(s->s3->send_connection_binding)
         {
@@ -1581,6 +1603,18 @@ unsigned char *ssl_add_serverhello_tlsext(SSL *s, unsigned char *buf, unsigned c
 
           ret += el;
         }
+
+	/* Only add RI for SSLv3 */
+	if (s->version == SSL3_VERSION)
+		goto done;
+
+	if (!s->hit && s->servername_done == 1 && s->session->tlsext_hostname != NULL)
+		{
+		if ((long)(limit - ret - 4) < 0) return NULL;
+
+		s2n(TLSEXT_TYPE_server_name,ret);
+		s2n(0,ret);
+		}
 
 #ifndef OPENSSL_NO_EC
 	if (using_ecc)
@@ -1722,12 +1756,11 @@ unsigned char *ssl_add_serverhello_tlsext(SSL *s, unsigned char *buf, unsigned c
 #ifdef TLSEXT_TYPE_encrypt_then_mac
 	if (s->s3->flags & TLS1_FLAGS_ENCRYPT_THEN_MAC)
 		{
-		/* Don't use encrypt_then_mac if AEAD, RC4 or SSL 3.0:
+		/* Don't use encrypt_then_mac if AEAD or RC4
 		 * might want to disable for other cases too.
 		 */
 		if (s->s3->tmp.new_cipher->algorithm_mac == SSL_AEAD
-		    || s->s3->tmp.new_cipher->algorithm_enc == SSL_RC4
-		    || s->version == SSL3_VERSION)
+		    || s->s3->tmp.new_cipher->algorithm_enc == SSL_RC4)
 			s->s3->flags &= ~TLS1_FLAGS_ENCRYPT_THEN_MAC;
 		else
 			{
@@ -1751,6 +1784,8 @@ unsigned char *ssl_add_serverhello_tlsext(SSL *s, unsigned char *buf, unsigned c
 		memcpy(ret, selected, len);
 		ret += len;
 		}
+
+	done:
 
 	if ((extdatalen = ret-orig-2)== 0) 
 		return orig;
@@ -1974,6 +2009,14 @@ static int ssl_scan_clienthello_tlsext(SSL *s, unsigned char **p, unsigned char 
 		if (s->tlsext_debug_cb)
 			s->tlsext_debug_cb(s, 0, type, data, size,
 						s->tlsext_debug_arg);
+		if (type == TLSEXT_TYPE_renegotiate)
+			{
+			if(!ssl_parse_clienthello_renegotiate_ext(s, data, size, al))
+				return 0;
+			renegotiate_seen = 1;
+			}
+		else if (s->version == SSL3_VERSION)
+			{}
 /* The servername extension is treated as follows:
 
    - Only the hostname type is supported with a maximum length of 255.
@@ -1997,7 +2040,7 @@ static int ssl_scan_clienthello_tlsext(SSL *s, unsigned char **p, unsigned char 
 
 */      
 
-		if (type == TLSEXT_TYPE_server_name)
+		else if (type == TLSEXT_TYPE_server_name)
 			{
 			unsigned char *sdata;
 			int servname_type;
@@ -2149,7 +2192,9 @@ static int ssl_scan_clienthello_tlsext(SSL *s, unsigned char **p, unsigned char 
 			ellipticcurvelist_length += (*(sdata++));
 
 			if (ellipticcurvelist_length != size - 2 ||
-				ellipticcurvelist_length < 1)
+				ellipticcurvelist_length < 1 ||
+				/* Each NamedCurve is 2 bytes. */
+				ellipticcurvelist_length & 1)
 				{
 				*al = TLS1_AD_DECODE_ERROR;
 				return 0;
@@ -2217,12 +2262,6 @@ static int ssl_scan_clienthello_tlsext(SSL *s, unsigned char **p, unsigned char 
 				*al = TLS1_AD_INTERNAL_ERROR;
 				return 0;
 				}
-			}
-		else if (type == TLSEXT_TYPE_renegotiate)
-			{
-			if(!ssl_parse_clienthello_renegotiate_ext(s, data, size, al))
-				return 0;
-			renegotiate_seen = 1;
 			}
 		else if (type == TLSEXT_TYPE_signature_algorithms)
 			{
@@ -2419,10 +2458,7 @@ static int ssl_scan_clienthello_tlsext(SSL *s, unsigned char **p, unsigned char 
                         }
 #ifdef TLSEXT_TYPE_encrypt_then_mac
 		else if (type == TLSEXT_TYPE_encrypt_then_mac)
-			{
-			if (s->version != SSL3_VERSION)
-				s->s3->flags |= TLS1_FLAGS_ENCRYPT_THEN_MAC;
-			}
+			s->s3->flags |= TLS1_FLAGS_ENCRYPT_THEN_MAC;
 #endif
 		/* If this ClientHello extension was unhandled and this is 
 		 * a nonresumed connection, check whether the extension is a 
@@ -2507,6 +2543,7 @@ static int ssl_scan_serverhello_tlsext(SSL *s, unsigned char **p, unsigned char 
 #ifndef OPENSSL_NO_NEXTPROTONEG
 	s->s3->next_proto_neg_seen = 0;
 #endif
+	s->tlsext_ticket_expected = 0;
 
 	if (s->s3->alpn_selected)
 		{
@@ -2545,7 +2582,16 @@ static int ssl_scan_serverhello_tlsext(SSL *s, unsigned char **p, unsigned char 
 			s->tlsext_debug_cb(s, 1, type, data, size,
 						s->tlsext_debug_arg);
 
-		if (type == TLSEXT_TYPE_server_name)
+
+		if (type == TLSEXT_TYPE_renegotiate)
+			{
+			if(!ssl_parse_serverhello_renegotiate_ext(s, data, size, al))
+				return 0;
+			renegotiate_seen = 1;
+			}
+		else if (s->version == SSL3_VERSION)
+			{}
+		else if (type == TLSEXT_TYPE_server_name)
 			{
 			if (s->tlsext_hostname == NULL || size > 0)
 				{
@@ -2727,13 +2773,6 @@ static int ssl_scan_serverhello_tlsext(SSL *s, unsigned char **p, unsigned char 
 			memcpy(s->s3->alpn_selected, data + 3, len);
 			s->s3->alpn_selected_len = len;
 			}
-
-		else if (type == TLSEXT_TYPE_renegotiate)
-			{
-			if(!ssl_parse_serverhello_renegotiate_ext(s, data, size, al))
-				return 0;
-			renegotiate_seen = 1;
-			}
 #ifndef OPENSSL_NO_HEARTBEATS
 		else if (type == TLSEXT_TYPE_heartbeat)
 			{
@@ -2760,10 +2799,9 @@ static int ssl_scan_serverhello_tlsext(SSL *s, unsigned char **p, unsigned char 
 #ifdef TLSEXT_TYPE_encrypt_then_mac
 		else if (type == TLSEXT_TYPE_encrypt_then_mac)
 			{
-			/* Ignore if inappropriate ciphersuite or SSL 3.0 */
+			/* Ignore if inappropriate ciphersuite */
 			if (s->s3->tmp.new_cipher->algorithm_mac != SSL_AEAD
-			    && s->s3->tmp.new_cipher->algorithm_enc != SSL_RC4
-			    && s->version != SSL3_VERSION)
+			    && s->s3->tmp.new_cipher->algorithm_enc != SSL_RC4)
 				s->s3->flags |= TLS1_FLAGS_ENCRYPT_THEN_MAC;
 			}
 #endif
@@ -2968,11 +3006,54 @@ static int ssl_check_clienthello_tlsext_early(SSL *s)
 		}
 	}
 
+int tls1_set_server_sigalgs(SSL *s)
+	{
+	int al;
+	size_t i;
+	/* Clear any shared sigtnature algorithms */
+	if (s->cert->shared_sigalgs)
+		{
+		OPENSSL_free(s->cert->shared_sigalgs);
+		s->cert->shared_sigalgs = NULL;
+		}
+	/* Clear certificate digests and validity flags */
+	for (i = 0; i < SSL_PKEY_NUM; i++)
+		{
+		s->cert->pkeys[i].digest = NULL;
+		s->cert->pkeys[i].valid_flags = 0;
+		}
+
+	/* If sigalgs received process it. */
+	if (s->cert->peer_sigalgs)
+		{
+		if (!tls1_process_sigalgs(s))
+			{
+			SSLerr(SSL_F_TLS1_SET_SERVER_SIGALGS,
+					ERR_R_MALLOC_FAILURE);
+			al = SSL_AD_INTERNAL_ERROR;
+			goto err;
+			}
+		/* Fatal error is no shared signature algorithms */
+		if (!s->cert->shared_sigalgs)
+			{
+			SSLerr(SSL_F_TLS1_SET_SERVER_SIGALGS,
+					SSL_R_NO_SHARED_SIGATURE_ALGORITHMS);
+			al = SSL_AD_ILLEGAL_PARAMETER;
+			goto err;
+			}
+		}
+	else
+		ssl_cert_set_default_md(s->cert);
+	return 1;
+	err:
+	ssl3_send_alert(s, SSL3_AL_FATAL, al);
+	return 0;
+	}
+
 int ssl_check_clienthello_tlsext_late(SSL *s)
 	{
 	int ret = SSL_TLSEXT_ERR_OK;
 	int al;
-	size_t i;
 
 	/* If status request then ask callback what to do.
  	 * Note: this must be called after servername callbacks in case
@@ -3017,43 +3098,6 @@ int ssl_check_clienthello_tlsext_late(SSL *s)
 		}
 	else
 		s->tlsext_status_expected = 0;
-
-	/* Clear any shared sigtnature algorithms */
-	if (s->cert->shared_sigalgs)
-		{
-		OPENSSL_free(s->cert->shared_sigalgs);
-		s->cert->shared_sigalgs = NULL;
-		}
-	/* Clear certificate digests and validity flags */
-	for (i = 0; i < SSL_PKEY_NUM; i++)
-		{
-		s->cert->pkeys[i].digest = NULL;
-		s->cert->pkeys[i].valid_flags = 0;
-		}
-
-	/* If sigalgs received process it. */
-	if (s->cert->peer_sigalgs)
-		{
-		if (!tls1_process_sigalgs(s))
-			{
-			SSLerr(SSL_F_SSL_CHECK_CLIENTHELLO_TLSEXT_LATE,
-					ERR_R_MALLOC_FAILURE);
-			ret = SSL_TLSEXT_ERR_ALERT_FATAL;
-			al = SSL_AD_INTERNAL_ERROR;
-			goto err;
-			}
-		/* Fatal error is no shared signature algorithms */
-		if (!s->cert->shared_sigalgs)
-			{
-			SSLerr(SSL_F_SSL_CHECK_CLIENTHELLO_TLSEXT_LATE,
-					SSL_R_NO_SHARED_SIGATURE_ALGORITHMS);
-			ret = SSL_TLSEXT_ERR_ALERT_FATAL;
-			al = SSL_AD_ILLEGAL_PARAMETER;
-			goto err;
-			}
-		}
-	else
-		ssl_cert_set_default_md(s->cert);
 
  err:
 	switch (ret)
@@ -3555,10 +3599,8 @@ static const tls12_hash_info *tls12_get_hash_info(unsigned char hash_alg)
 const EVP_MD *tls12_get_hash(unsigned char hash_alg)
 	{
 	const tls12_hash_info *inf;
-#ifndef OPENSSL_FIPS
 	if (hash_alg == TLSEXT_hash_md5 && FIPS_mode())
 		return NULL;
-#endif
 	inf = tls12_get_hash_info(hash_alg);
 	if (!inf || !inf->mfunc)
 		return NULL; 
@@ -3961,6 +4003,11 @@ tls1_process_heartbeat(SSL *s)
 		 * payload, plus padding
 		 */
 		buffer = OPENSSL_malloc(1 + 2 + payload + padding);
+		if (buffer == NULL)
+			{
+			SSLerr(SSL_F_TLS1_PROCESS_HEARTBEAT,ERR_R_MALLOC_FAILURE);
+			return -1;
+			}
 		bp = buffer;
 		
 		/* Enter response type, length and copy payload */
@@ -4047,6 +4094,11 @@ tls1_heartbeat(SSL *s)
 	 *  - Padding
 	 */
 	buf = OPENSSL_malloc(1 + 2 + payload + padding);
+	if (buf == NULL)
+		{
+		SSLerr(SSL_F_TLS1_HEARTBEAT,ERR_R_MALLOC_FAILURE);
+		return -1;
+		}
 	p = buf;
 	/* Message Type */
 	*p++ = TLS1_HB_REQUEST;
@@ -4289,13 +4341,10 @@ int tls1_check_chain(SSL *s, X509 *x, EVP_PKEY *pk, STACK_OF(X509) *chain,
 		if (check_flags)
 			check_flags |= CERT_PKEY_SUITEB;
 		ok = X509_chain_check_suiteb(NULL, x, chain, suiteb_flags);
-		if (ok != X509_V_OK)
-			{
-			if (check_flags)
-				rv |= CERT_PKEY_SUITEB;
-			else
-				goto end;
-			}
+		if (ok == X509_V_OK)
+			rv |= CERT_PKEY_SUITEB;
+		else if (!check_flags)
+			goto end;
 		}
 
 	/* Check all signature algorithms are consistent with

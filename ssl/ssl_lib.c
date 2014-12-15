@@ -263,7 +263,7 @@ int SSL_CTX_set_ssl_version(SSL_CTX *ctx,const SSL_METHOD *meth)
 
 	sk=ssl_create_cipher_list(ctx->method,&(ctx->cipher_list),
 		&(ctx->cipher_list_by_id),
-		meth->version == SSL2_VERSION ? "SSLv2" : SSL_DEFAULT_CIPHER_LIST, ctx->cert);
+		SSL_DEFAULT_CIPHER_LIST, ctx->cert);
 	if ((sk == NULL) || (sk_SSL_CIPHER_num(sk) <= 0))
 		{
 		SSLerr(SSL_F_SSL_CTX_SET_SSL_VERSION,SSL_R_SSL_LIBRARY_HAS_NO_CIPHERS);
@@ -417,13 +417,7 @@ SSL *SSL_new(SSL_CTX *ctx)
 	return(s);
 err:
 	if (s != NULL)
-		{
-		if (s->cert != NULL)
-			ssl_cert_free(s->cert);
-		if (s->ctx != NULL)
-			SSL_CTX_free(s->ctx); /* decrement reference count */
-		OPENSSL_free(s);
-		}
+		SSL_free(s);
 	SSLerr(SSL_F_SSL_NEW,ERR_R_MALLOC_FAILURE);
 	return(NULL);
 	}
@@ -488,17 +482,6 @@ int SSL_has_matching_session_id(const SSL *ssl, const unsigned char *id,
 	r.ssl_version = ssl->version;
 	r.session_id_length = id_len;
 	memcpy(r.session_id, id, id_len);
-	/* NB: SSLv2 always uses a fixed 16-byte session ID, so even if a
-	 * callback is calling us to check the uniqueness of a shorter ID, it
-	 * must be compared as a padded-out ID because that is what it will be
-	 * converted to when the callback has finished choosing it. */
-	if((r.ssl_version == SSL2_VERSION) &&
-			(id_len < SSL2_SSL_SESSION_ID_LENGTH))
-		{
-		memset(r.session_id + id_len, 0,
-			SSL2_SSL_SESSION_ID_LENGTH - id_len);
-		r.session_id_length = SSL2_SSL_SESSION_ID_LENGTH;
-		}
 
 	CRYPTO_r_lock(CRYPTO_LOCK_SSL_CTX);
 	p = lh_SSL_SESSION_retrieve(ssl->ctx->sessions, &r);
@@ -1129,18 +1112,6 @@ long SSL_ctrl(SSL *s,int cmd,long larg,void *parg)
 		l=s->max_cert_list;
 		s->max_cert_list=larg;
 		return(l);
-	case SSL_CTRL_SET_MTU:
-#ifndef OPENSSL_NO_DTLS1
-		if (larg < (long)dtls1_min_mtu())
-			return 0;
-#endif
-
-		if (SSL_IS_DTLS(s))
-			{
-			s->d1->mtu = larg;
-			return larg;
-			}
-		return 0;
 	case SSL_CTRL_SET_MAX_SEND_FRAGMENT:
 		if (larg < 512 || larg > SSL3_RT_MAX_PLAIN_LENGTH)
 			return 0;
@@ -1912,13 +1883,11 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth)
 		return(NULL);
 		}
 
-#ifdef OPENSSL_FIPS
 	if (FIPS_mode() && (meth->version < TLS1_VERSION))	
 		{
 		SSLerr(SSL_F_SSL_CTX_NEW, SSL_R_ONLY_TLS_ALLOWED_IN_FIPS_MODE);
 		return NULL;
 		}
-#endif
 
 	if (SSL_get_ex_data_X509_STORE_CTX_idx() < 0)
 		{
@@ -1955,7 +1924,6 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth)
 /*	ret->cipher=NULL;*/
 /*	ret->s2->challenge=NULL;
 	ret->master_key=NULL;
-	ret->key_arg=NULL;
 	ret->s2->conn_id=NULL; */
 
 	ret->info_callback=NULL;
@@ -1989,7 +1957,7 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth)
 
 	ssl_create_cipher_list(ret->method,
 		&ret->cipher_list,&ret->cipher_list_by_id,
-		meth->version == SSL2_VERSION ? "SSLv2" : SSL_DEFAULT_CIPHER_LIST, ret->cert);
+		SSL_DEFAULT_CIPHER_LIST, ret->cert);
 	if (ret->cipher_list == NULL
 	    || sk_SSL_CIPHER_num(ret->cipher_list) <= 0)
 		{
@@ -2001,11 +1969,6 @@ SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth)
 	if (!ret->param)
 		goto err;
 
-	if ((ret->rsa_md5=EVP_get_digestbyname("ssl2-md5")) == NULL)
-		{
-		SSLerr(SSL_F_SSL_CTX_NEW,SSL_R_UNABLE_TO_LOAD_SSL2_MD5_ROUTINES);
-		goto err2;
-		}
 	if ((ret->md5=EVP_get_digestbyname("ssl3-md5")) == NULL)
 		{
 		SSLerr(SSL_F_SSL_CTX_NEW,SSL_R_UNABLE_TO_LOAD_SSL3_MD5_ROUTINES);
@@ -2792,17 +2755,9 @@ int SSL_get_error(const SSL *s,int i)
 
 	if (i == 0)
 		{
-		if (s->version == SSL2_VERSION)
-			{
-			/* assume it is the socket being closed */
+		if ((s->shutdown & SSL_RECEIVED_SHUTDOWN) &&
+			(s->s3->warn_alert == SSL_AD_CLOSE_NOTIFY))
 			return(SSL_ERROR_ZERO_RETURN);
-			}
-		else
-			{
-			if ((s->shutdown & SSL_RECEIVED_SHUTDOWN) &&
-				(s->s3->warn_alert == SSL_AD_CLOSE_NOTIFY))
-				return(SSL_ERROR_ZERO_RETURN);
-			}
 		}
 	return(SSL_ERROR_SYSCALL);
 	}
@@ -2886,8 +2841,6 @@ const char *SSL_get_version(const SSL *s)
 		return("TLSv1");
 	else if (s->version == SSL3_VERSION)
 		return("SSLv3");
-	else if (s->version == SSL2_VERSION)
-		return("SSLv2");
 	else
 		return("unknown");
 	}

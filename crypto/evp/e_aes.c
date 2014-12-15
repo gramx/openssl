@@ -48,7 +48,7 @@
  *
  */
 
-#define OPENSSL_FIPSAPI
+
 
 #include <openssl/opensslconf.h>
 #ifndef OPENSSL_NO_AES
@@ -106,6 +106,25 @@ typedef struct
 	CCM128_CONTEXT ccm;
 	ccm128_f str;
 	} EVP_AES_CCM_CTX;
+
+#ifndef OPENSSL_NO_OCB
+typedef struct
+	{
+	AES_KEY ksenc;		/* AES key schedule to use for encryption */
+	AES_KEY ksdec;		/* AES key schedule to use for decryption */
+	int key_set;		/* Set if key initialised */
+	int iv_set;		/* Set if an iv is set */
+	OCB128_CONTEXT ocb;
+	unsigned char *iv;	/* Temporary IV store */
+	unsigned char tag[16];
+	unsigned char data_buf[16]; /* Store partial data blocks */
+	unsigned char aad_buf[16]; /* Store partial AAD blocks */
+	int data_buf_len;
+	int aad_buf_len;
+	int ivlen;		/* IV length */
+	int taglen;
+	} EVP_AES_OCB_CTX;
+#endif
 
 #define MAXBITCHUNK	((size_t)1<<(sizeof(size_t)*8-4))
 
@@ -450,6 +469,59 @@ static int aesni_ccm_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
 #define aesni_ccm_cipher aes_ccm_cipher
 static int aesni_ccm_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 		const unsigned char *in, size_t len);
+
+#ifndef OPENSSL_NO_OCB
+static int aesni_ocb_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
+                        const unsigned char *iv, int enc)
+	{
+	EVP_AES_OCB_CTX *octx = ctx->cipher_data;
+	if (!iv && !key)
+		return 1;
+	if (key)
+		{
+		do
+			{
+			/* We set both the encrypt and decrypt key here because decrypt
+			 * needs both. We could possibly optimise to remove setting the
+			 * decrypt for an encryption operation.
+			 */
+			aesni_set_encrypt_key(key, ctx->key_len * 8, &octx->ksenc);
+			aesni_set_decrypt_key(key, ctx->key_len * 8, &octx->ksdec);
+			if(!CRYPTO_ocb128_init(&octx->ocb, &octx->ksenc, &octx->ksdec,
+					(block128_f)aesni_encrypt, (block128_f)aesni_decrypt))
+				return 0;
+			}
+		while (0);
+
+		/* If we have an iv we can set it directly, otherwise use
+		 * saved IV.
+		 */
+		if (iv == NULL && octx->iv_set)
+			iv = octx->iv;
+		if (iv)
+			{
+			if(CRYPTO_ocb128_setiv(&octx->ocb, iv, octx->ivlen, octx->taglen) != 1)
+				return 0;
+			octx->iv_set = 1;
+			}
+		octx->key_set = 1;
+		}
+	else
+		{
+		/* If key set use IV, otherwise copy */
+		if (octx->key_set)
+			CRYPTO_ocb128_setiv(&octx->ocb, iv, octx->ivlen, octx->taglen);
+		else
+			memcpy(octx->iv, iv, octx->ivlen);
+		octx->iv_set = 1;
+		}
+	return 1;
+	}
+
+#define aesni_ocb_cipher aes_ocb_cipher
+static int aesni_ocb_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+		const unsigned char *in, size_t len);
+#endif /* OPENSSL_NO_OCB */
 
 #define BLOCK_CIPHER_generic(nid,keylen,blocksize,ivlen,nmode,mode,MODE,flags) \
 static const EVP_CIPHER aesni_##keylen##_##mode = { \
@@ -837,6 +909,59 @@ static int aes_t4_ccm_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
 static int aes_t4_ccm_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 		const unsigned char *in, size_t len);
 
+#ifndef OPENSSL_NO_OCB
+static int aes_t4_ocb_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
+                        const unsigned char *iv, int enc)
+	{
+	EVP_AES_OCB_CTX *octx = ctx->cipher_data;
+	if (!iv && !key)
+		return 1;
+	if (key)
+		{
+		do
+			{
+			/* We set both the encrypt and decrypt key here because decrypt
+			 * needs both. We could possibly optimise to remove setting the
+			 * decrypt for an encryption operation.
+			 */
+			aes_t4_set_encrypt_key(key, ctx->key_len * 8, &octx->ksenc);
+			aes_t4_set_decrypt_key(key, ctx->key_len * 8, &octx->ksdec);
+			if(!CRYPTO_ocb128_init(&octx->ocb, &octx->ksenc, &octx->ksdec,
+					(block128_f)aes_t4_encrypt, (block128_f)aes_t4_decrypt))
+				return 0;
+			}
+		while (0);
+
+		/* If we have an iv we can set it directly, otherwise use
+		 * saved IV.
+		 */
+		if (iv == NULL && octx->iv_set)
+			iv = octx->iv;
+		if (iv)
+			{
+			if(CRYPTO_ocb128_setiv(&octx->ocb, iv, octx->ivlen, octx->taglen) != 1)
+				return 0;
+			octx->iv_set = 1;
+			}
+		octx->key_set = 1;
+		}
+	else
+		{
+		/* If key set use IV, otherwise copy */
+		if (octx->key_set)
+			CRYPTO_ocb128_setiv(&octx->ocb, iv, octx->ivlen, octx->taglen);
+		else
+			memcpy(octx->iv, iv, octx->ivlen);
+		octx->iv_set = 1;
+		}
+	return 1;
+	}
+
+#define aes_t4_ocb_cipher aes_ocb_cipher
+static int aes_t4_ocb_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+		const unsigned char *in, size_t len);
+#endif /* OPENSSL_NO_OCB */
+
 #define BLOCK_CIPHER_generic(nid,keylen,blocksize,ivlen,nmode,mode,MODE,flags) \
 static const EVP_CIPHER aes_t4_##keylen##_##mode = { \
 	nid##_##keylen##_##nmode,blocksize,keylen/8,ivlen, \
@@ -1160,9 +1285,9 @@ static int aes_ctr_cipher (EVP_CIPHER_CTX *ctx, unsigned char *out,
 	return 1;
 }
 
-BLOCK_CIPHER_generic_pack(NID_aes,128,EVP_CIPH_FLAG_FIPS)
-BLOCK_CIPHER_generic_pack(NID_aes,192,EVP_CIPH_FLAG_FIPS)
-BLOCK_CIPHER_generic_pack(NID_aes,256,EVP_CIPH_FLAG_FIPS)
+BLOCK_CIPHER_generic_pack(NID_aes,128,0)
+BLOCK_CIPHER_generic_pack(NID_aes,192,0)
+BLOCK_CIPHER_generic_pack(NID_aes,256,0)
 
 static int aes_gcm_cleanup(EVP_CIPHER_CTX *c)
 	{
@@ -1205,11 +1330,6 @@ static int aes_gcm_ctrl(EVP_CIPHER_CTX *c, int type, int arg, void *ptr)
 	case EVP_CTRL_GCM_SET_IVLEN:
 		if (arg <= 0)
 			return 0;
-#ifdef OPENSSL_FIPS
-		if (FIPS_module_mode() && !(c->flags & EVP_CIPH_FLAG_NON_FIPS_ALLOW)
-						 && arg < 12)
-			return 0;
-#endif
 		/* Allocate memory for IV if needed */
 		if ((arg > EVP_MAX_IV_LENGTH) && (arg > gctx->ivlen))
 			{
@@ -1713,11 +1833,11 @@ static int aes_gcm_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 		| EVP_CIPH_CUSTOM_COPY)
 
 BLOCK_CIPHER_custom(NID_aes,128,1,12,gcm,GCM,
-		EVP_CIPH_FLAG_FIPS|EVP_CIPH_FLAG_AEAD_CIPHER|CUSTOM_FLAGS)
+		EVP_CIPH_FLAG_AEAD_CIPHER|CUSTOM_FLAGS)
 BLOCK_CIPHER_custom(NID_aes,192,1,12,gcm,GCM,
-		EVP_CIPH_FLAG_FIPS|EVP_CIPH_FLAG_AEAD_CIPHER|CUSTOM_FLAGS)
+		EVP_CIPH_FLAG_AEAD_CIPHER|CUSTOM_FLAGS)
 BLOCK_CIPHER_custom(NID_aes,256,1,12,gcm,GCM,
-		EVP_CIPH_FLAG_FIPS|EVP_CIPH_FLAG_AEAD_CIPHER|CUSTOM_FLAGS)
+		EVP_CIPH_FLAG_AEAD_CIPHER|CUSTOM_FLAGS)
 
 static int aes_xts_ctrl(EVP_CIPHER_CTX *c, int type, int arg, void *ptr)
 	{
@@ -1851,15 +1971,6 @@ static int aes_xts_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 		return 0;
 	if (!out || !in || len<AES_BLOCK_SIZE)
 		return 0;
-#ifdef OPENSSL_FIPS
-	/* Requirement of SP800-38E */
-	if (FIPS_module_mode() && !(ctx->flags & EVP_CIPH_FLAG_NON_FIPS_ALLOW) &&
-			(len > (1UL<<20)*16))
-		{
-		EVPerr(EVP_F_AES_XTS_CIPHER, EVP_R_TOO_LARGE);
-		return 0;
-		}
-#endif
 	if (xctx->stream)
 		(*xctx->stream)(in, out, len,
 				xctx->xts.key1, xctx->xts.key2, ctx->iv);
@@ -1875,8 +1986,8 @@ static int aes_xts_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 			 | EVP_CIPH_ALWAYS_CALL_INIT | EVP_CIPH_CTRL_INIT \
 			 | EVP_CIPH_CUSTOM_COPY)
 
-BLOCK_CIPHER_custom(NID_aes,128,1,16,xts,XTS,EVP_CIPH_FLAG_FIPS|XTS_FLAGS)
-BLOCK_CIPHER_custom(NID_aes,256,1,16,xts,XTS,EVP_CIPH_FLAG_FIPS|XTS_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,128,1,16,xts,XTS,XTS_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,256,1,16,xts,XTS,XTS_FLAGS)
 
 static int aes_ccm_ctrl(EVP_CIPHER_CTX *c, int type, int arg, void *ptr)
 	{
@@ -2058,9 +2169,9 @@ static int aes_ccm_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
 
 #define aes_ccm_cleanup NULL
 
-BLOCK_CIPHER_custom(NID_aes,128,1,12,ccm,CCM,EVP_CIPH_FLAG_FIPS|CUSTOM_FLAGS)
-BLOCK_CIPHER_custom(NID_aes,192,1,12,ccm,CCM,EVP_CIPH_FLAG_FIPS|CUSTOM_FLAGS)
-BLOCK_CIPHER_custom(NID_aes,256,1,12,ccm,CCM,EVP_CIPH_FLAG_FIPS|CUSTOM_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,128,1,12,ccm,CCM,CUSTOM_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,192,1,12,ccm,CCM,CUSTOM_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,256,1,12,ccm,CCM,CUSTOM_FLAGS)
 
 typedef struct
 	{
@@ -2237,5 +2348,292 @@ const EVP_CIPHER *EVP_aes_256_wrap_pad(void)
 	{
 	return &aes_256_wrap_pad;
 	}
+
+#ifndef OPENSSL_NO_OCB
+static int aes_ocb_ctrl(EVP_CIPHER_CTX *c, int type, int arg, void *ptr)
+	{
+	EVP_AES_OCB_CTX *octx = c->cipher_data;
+	EVP_CIPHER_CTX *newc;
+	EVP_AES_OCB_CTX *new_octx;
+
+	switch (type)
+		{
+	case EVP_CTRL_INIT:
+		octx->key_set = 0;
+		octx->iv_set = 0;
+		octx->ivlen = c->cipher->iv_len;
+		octx->iv = c->iv;
+		octx->taglen = 16;
+		octx->data_buf_len = 0;
+		octx->aad_buf_len = 0;
+		return 1;
+
+	case EVP_CTRL_SET_IVLEN:
+		/* IV len must be 1 to 15 */
+		if (arg <= 0 || arg > 15)
+			return 0;
+
+		octx->ivlen = arg;
+		return 1;
+
+	case EVP_CTRL_OCB_SET_TAGLEN:
+		/* Tag len must be 0 to 16 */
+		if (arg < 0 || arg > 16)
+			return 0;
+
+		octx->taglen = arg;
+		return 1;
+
+	case EVP_CTRL_SET_TAG:
+		if (arg != octx->taglen || c->encrypt)
+			return 0;
+		memcpy(octx->tag, ptr, arg);
+		return 1;
+
+	case EVP_CTRL_GET_TAG:
+		if (arg != octx->taglen || !c->encrypt)
+			return 0;
+
+		memcpy(ptr, octx->tag, arg);
+		return 1;
+
+	case EVP_CTRL_COPY:
+		newc = (EVP_CIPHER_CTX *)ptr;
+		new_octx = newc->cipher_data;
+		return CRYPTO_ocb128_copy_ctx(&new_octx->ocb, &octx->ocb,
+			&new_octx->ksenc, &new_octx->ksdec);
+
+	default:
+		return -1;
+
+		}
+	}
+
+
+static int aes_ocb_init_key(EVP_CIPHER_CTX *ctx, const unsigned char *key,
+		const unsigned char *iv, int enc)
+	{
+	EVP_AES_OCB_CTX *octx = ctx->cipher_data;
+	if (!iv && !key)
+		return 1;
+	if (key)
+		{
+		do
+			{
+			/* We set both the encrypt and decrypt key here because decrypt
+			 * needs both. We could possibly optimise to remove setting the
+			 * decrypt for an encryption operation.
+			 */
+#ifdef VPAES_CAPABLE
+			if (VPAES_CAPABLE)
+				{
+				vpaes_set_encrypt_key(key,ctx->key_len*8,&octx->ksenc);
+				vpaes_set_decrypt_key(key,ctx->key_len*8,&octx->ksdec);
+				if(!CRYPTO_ocb128_init(&octx->ocb,&octx->ksenc,&octx->ksdec,
+						(block128_f)vpaes_encrypt,(block128_f)vpaes_decrypt))
+					return 0;
+				break;
+				}
+#endif
+			AES_set_encrypt_key(key, ctx->key_len * 8, &octx->ksenc);
+			AES_set_decrypt_key(key, ctx->key_len * 8, &octx->ksdec);
+			if(!CRYPTO_ocb128_init(&octx->ocb, &octx->ksenc, &octx->ksdec,
+					(block128_f)AES_encrypt, (block128_f)AES_decrypt))
+				return 0;
+			}
+		while (0);
+
+		/* If we have an iv we can set it directly, otherwise use
+		 * saved IV.
+		 */
+		if (iv == NULL && octx->iv_set)
+			iv = octx->iv;
+		if (iv)
+			{
+			if(CRYPTO_ocb128_setiv(&octx->ocb, iv, octx->ivlen, octx->taglen) != 1)
+				return 0;
+			octx->iv_set = 1;
+			}
+		octx->key_set = 1;
+		}
+	else
+		{
+		/* If key set use IV, otherwise copy */
+		if (octx->key_set)
+			CRYPTO_ocb128_setiv(&octx->ocb, iv, octx->ivlen, octx->taglen);
+		else
+			memcpy(octx->iv, iv, octx->ivlen);
+		octx->iv_set = 1;
+		}
+	return 1;
+	}
+
+static int aes_ocb_cipher(EVP_CIPHER_CTX *ctx, unsigned char *out,
+		const unsigned char *in, size_t len)
+	{
+	unsigned char *buf;
+	int *buf_len;
+	int written_len = 0;
+	size_t trailing_len;
+	EVP_AES_OCB_CTX *octx = ctx->cipher_data;
+
+	/* If IV or Key not set then return error */
+	if (!octx->iv_set)
+		return -1;
+
+	if (!octx->key_set)
+		return -1;
+
+	if (in)
+		{
+		/* Need to ensure we are only passing full blocks to low level OCB
+		 * routines. We do it here rather than in EVP_EncryptUpdate/
+		 * EVP_DecryptUpdate because we need to pass full blocks of AAD too
+		 * and those routines don't support that
+		 */
+
+		/* Are we dealing with AAD or normal data here? */
+		if (out == NULL)
+			{
+			buf = octx->aad_buf;
+			buf_len = &(octx->aad_buf_len);
+			}
+		else
+			{
+			buf = octx->data_buf;
+			buf_len = &(octx->data_buf_len);
+			}
+
+		/* If we've got a partially filled buffer from a previous call then use
+		 * that data first
+		 */
+		if(*buf_len)
+			{
+			unsigned int remaining;
+
+			remaining = 16 - (*buf_len);
+			if(remaining > len)
+				{
+				memcpy(buf+(*buf_len), in, len);
+				*(buf_len)+=len;
+				return 0;
+				}
+			memcpy(buf+(*buf_len), in, remaining);
+
+			/* If we get here we've filled the buffer, so process it */
+			len -= remaining;
+			in += remaining;
+			if (out == NULL)
+				{
+				if(!CRYPTO_ocb128_aad(&octx->ocb, buf, 16))
+					return -1;
+				}
+			else if (ctx->encrypt)
+				{
+				if(!CRYPTO_ocb128_encrypt(&octx->ocb, buf, out, 16))
+					return -1;
+				}
+			else
+				{
+				if(!CRYPTO_ocb128_decrypt(&octx->ocb, buf, out, 16))
+					return -1;
+				}
+			written_len = 16;
+			*buf_len = 0;
+			}
+
+		/* Do we have a partial block to handle at the end? */
+		trailing_len = len % 16;
+
+		/* If we've got some full blocks to handle, then process these first */
+		if(len != trailing_len)
+			{
+			if (out == NULL)
+				{
+				if(!CRYPTO_ocb128_aad(&octx->ocb, in, len-trailing_len))
+					return -1;
+				}
+			else if (ctx->encrypt)
+				{
+				if(!CRYPTO_ocb128_encrypt(&octx->ocb, in, out, len-trailing_len))
+					return -1;
+				}
+			else
+				{
+				if(!CRYPTO_ocb128_decrypt(&octx->ocb, in, out, len-trailing_len))
+					return -1;
+				}
+			written_len += len-trailing_len;
+			in += len-trailing_len;
+			}
+
+		/* Handle any trailing partial block */
+		if(trailing_len)
+			{
+			memcpy(buf, in, trailing_len);
+			*buf_len = trailing_len;
+			}
+
+		return written_len;
+		}
+	else
+		{
+		/* First of all empty the buffer of any partial block that we might
+		 * have been provided - both for data and AAD
+		 */
+		if(octx->data_buf_len)
+			{
+			if (ctx->encrypt)
+				{
+				if(!CRYPTO_ocb128_encrypt(&octx->ocb, octx->data_buf, out,
+						octx->data_buf_len))
+					return -1;
+				}
+			else
+				{
+				if(!CRYPTO_ocb128_decrypt(&octx->ocb, octx->data_buf, out,
+						octx->data_buf_len))
+					return -1;
+				}
+			written_len = octx->data_buf_len;
+			octx->data_buf_len = 0;
+			}
+		if(octx->aad_buf_len)
+			{
+			if(!CRYPTO_ocb128_aad(&octx->ocb, octx->aad_buf, octx->aad_buf_len))
+				return -1;
+			octx->aad_buf_len = 0;
+			}
+		/* If decrypting then verify */
+		if (!ctx->encrypt)
+			{
+			if (octx->taglen < 0)
+				return -1;
+			if (CRYPTO_ocb128_finish(&octx->ocb,
+					octx->tag, octx->taglen) != 0)
+				return -1;
+			octx->iv_set = 0;
+			return written_len;
+			}
+		/* If encrypting then just get the tag */
+		if(CRYPTO_ocb128_tag(&octx->ocb, octx->tag, 16) != 1)
+			return -1;
+		/* Don't reuse the IV */
+		octx->iv_set = 0;
+		return written_len;
+		}
+	}
+
+static int aes_ocb_cleanup(EVP_CIPHER_CTX *c)
+	{
+	EVP_AES_OCB_CTX *octx = c->cipher_data;
+	CRYPTO_ocb128_cleanup(&octx->ocb);
+	return 1;
+	}
+
+BLOCK_CIPHER_custom(NID_aes,128,16,12,ocb,OCB,CUSTOM_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,192,16,12,ocb,OCB,CUSTOM_FLAGS)
+BLOCK_CIPHER_custom(NID_aes,256,16,12,ocb,OCB,CUSTOM_FLAGS)
+#endif /* OPENSSL_NO_OCB */
 
 #endif

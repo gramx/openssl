@@ -244,8 +244,8 @@ static int pkey_ec_derive(EVP_PKEY_CTX *ctx, unsigned char *key, size_t *keylen)
 	outlen = *keylen;
 		
 	ret = ECDH_compute_key(key, outlen, pubkey, eckey, 0);
-	if (ret < 0)
-		return ret;
+	if (ret <= 0)
+		return 0;
 	*keylen = ret;
 	return 1;
 	}
@@ -336,7 +336,7 @@ static int pkey_ec_ctrl(EVP_PKEY_CTX *ctx, int type, int p1, void *p2)
 			if (!ec_key->group)
 				return -2;
 			/* If cofactor is 1 cofactor mode does nothing */
-			if (BN_is_one(&ec_key->group->cofactor))
+			if (BN_is_one(ec_key->group->cofactor))
 				return 1;
 			if (!dctx->co_key)
 				{

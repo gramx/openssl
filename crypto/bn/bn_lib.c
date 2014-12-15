@@ -61,14 +61,13 @@
 # define NDEBUG
 #endif
 
-#define OPENSSL_FIPSAPI
+
 
 #include <assert.h>
 #include <limits.h>
 #include "cryptlib.h"
 #include "bn_lcl.h"
 
-__fips_constseg
 const char BN_version[]="Big Number" OPENSSL_VERSION_PTEXT;
 
 /* This stuff appears to be completely unused, so is deprecated */
@@ -143,7 +142,6 @@ const BIGNUM *BN_value_one(void)
 
 int BN_num_bits_word(BN_ULONG l)
 	{
-	__fips_constseg
 	static const unsigned char bits[256]={
 		0,1,2,2,3,3,3,3,4,4,4,4,4,4,4,4,
 		5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,
@@ -371,63 +369,6 @@ static BN_ULONG *bn_expand_internal(const BIGNUM *b, int words)
 		
 	return(a);
 	}
-
-/* This is an internal function that can be used instead of bn_expand2()
- * when there is a need to copy BIGNUMs instead of only expanding the
- * data part, while still expanding them.
- * Especially useful when needing to expand BIGNUMs that are declared
- * 'const' and should therefore not be changed.
- * The reason to use this instead of a BN_dup() followed by a bn_expand2()
- * is memory allocation overhead.  A BN_dup() followed by a bn_expand2()
- * will allocate new memory for the BIGNUM data twice, and free it once,
- * while bn_dup_expand() makes sure allocation is made only once.
- */
-
-#ifndef OPENSSL_NO_DEPRECATED
-BIGNUM *bn_dup_expand(const BIGNUM *b, int words)
-	{
-	BIGNUM *r = NULL;
-
-	bn_check_top(b);
-
-	/* This function does not work if
-	 *      words <= b->dmax && top < words
-	 * because BN_dup() does not preserve 'dmax'!
-	 * (But bn_dup_expand() is not used anywhere yet.)
-	 */
-
-	if (words > b->dmax)
-		{
-		BN_ULONG *a = bn_expand_internal(b, words);
-
-		if (a)
-			{
-			r = BN_new();
-			if (r)
-				{
-				r->top = b->top;
-				r->dmax = words;
-				r->neg = b->neg;
-				r->d = a;
-				}
-			else
-				{
-				/* r == NULL, BN_new failure */
-				OPENSSL_free(a);
-				}
-			}
-		/* If a == NULL, there was an error in allocation in
-		   bn_expand_internal(), and NULL should be returned */
-		}
-	else
-		{
-		r = BN_dup(b);
-		}
-
-	bn_check_top(r);
-	return r;
-	}
-#endif
 
 /* This is an internal function that should not be used in applications.
  * It ensures that 'b' has enough room for a 'words' word number
@@ -912,4 +853,130 @@ int BN_security_bits(int L, int N)
 	if (bits < 80)
 		return 0;
 	return bits >= secbits ? secbits : bits;
+	}
+
+
+void BN_zero_ex(BIGNUM *a)
+	{
+	a->top = 0;
+	a->neg = 0;
+	}
+
+int BN_abs_is_word(const BIGNUM *a, const BN_ULONG w)
+	{
+	return ((a->top == 1) && (a->d[0] == w)) || ((w == 0) && (a->top == 0));
+	}
+
+int BN_is_zero(const BIGNUM *a)
+	{
+	return a->top == 0;
+	}
+
+int BN_is_one(const BIGNUM *a)
+	{
+	return BN_abs_is_word(a, 1) && !a->neg;
+	}
+
+int BN_is_word(const BIGNUM *a, const BN_ULONG w)
+	{
+	return BN_abs_is_word(a, w) && (!w || !a->neg);
+	}
+
+int BN_is_odd(const BIGNUM *a)
+	{
+	return (a->top > 0) && (a->d[0] & 1);
+	}
+
+int BN_is_negative(const BIGNUM *a)
+	{
+	return (a->neg != 0);
+	}
+
+int BN_to_montgomery(BIGNUM *r,const BIGNUM *a,	BN_MONT_CTX *mont, BN_CTX *ctx)
+	{
+	return BN_mod_mul_montgomery(r,a,&(mont->RR),mont,ctx);
+	}
+
+void BN_with_flags(BIGNUM *dest, const BIGNUM *b, int n)
+	{
+	dest->d=b->d;
+	dest->top=b->top;
+	dest->dmax=b->dmax;
+	dest->neg=b->neg;
+	dest->flags=((dest->flags & BN_FLG_MALLOCED)
+		|  (b->flags & ~BN_FLG_MALLOCED)
+		|  BN_FLG_STATIC_DATA
+		|  n);
+	}
+
+BN_GENCB *BN_GENCB_new(void)
+	{
+	BN_GENCB *ret;
+
+	if ((ret=(BN_GENCB *)OPENSSL_malloc(sizeof(BN_GENCB))) == NULL)
+		{
+		BNerr(BN_F_BN_GENCB_NEW,ERR_R_MALLOC_FAILURE);
+		return(NULL);
+		}
+
+	return ret;
+	}
+
+void BN_GENCB_free(BN_GENCB *cb)
+	{
+	if (cb == NULL) return;
+	OPENSSL_free(cb);
+	}
+
+void BN_set_flags(BIGNUM *b, int n)
+	{
+	b->flags|=n;
+	}
+
+int BN_get_flags(const BIGNUM *b, int n)
+	{
+	return b->flags&n;
+	}
+
+/* Populate a BN_GENCB structure with an "old"-style callback */
+void BN_GENCB_set_old(BN_GENCB *gencb, void (*callback)(int, int, void *), void *cb_arg)
+	{
+	BN_GENCB *tmp_gencb = gencb;
+	tmp_gencb->ver = 1;
+	tmp_gencb->arg = cb_arg;
+	tmp_gencb->cb.cb_1 = callback;
+	}
+
+/* Populate a BN_GENCB structure with a "new"-style callback */
+void BN_GENCB_set(BN_GENCB *gencb, int (*callback)(int, int, BN_GENCB *), void *cb_arg)
+	{
+	BN_GENCB *tmp_gencb = gencb;
+	tmp_gencb->ver = 2;
+	tmp_gencb->arg = cb_arg;
+	tmp_gencb->cb.cb_2 = callback;
+	}
+
+void *BN_GENCB_get_arg(BN_GENCB *cb)
+	{
+	return cb->arg;
+	}
+
+
+BIGNUM *bn_wexpand(BIGNUM *a, int words)
+	{
+	return (words <= a->dmax)?a:bn_expand2(a,words);
+	}
+
+void bn_correct_top(BIGNUM *a)
+	{
+	BN_ULONG *ftl;
+	int tmp_top = a->top;
+
+	if (tmp_top > 0)
+		{
+		for (ftl= &(a->d[tmp_top-1]); tmp_top > 0; tmp_top--)
+			if (*(ftl--)) break;
+		a->top = tmp_top;
+		}
+	bn_pollute(a);
 	}

@@ -508,8 +508,9 @@ static void sv_usage(void)
 	BIO_printf(bio_err," -srpvfile file      - The verifier file for SRP\n");
 	BIO_printf(bio_err," -srpuserseed string - A seed string for a default user salt.\n");
 #endif
-	BIO_printf(bio_err," -ssl2         - Just talk SSLv2\n");
+#ifndef OPENSSL_NO_SSL3_METHOD
 	BIO_printf(bio_err," -ssl3         - Just talk SSLv3\n");
+#endif
 	BIO_printf(bio_err," -tls1_2       - Just talk TLSv1.2\n");
 	BIO_printf(bio_err," -tls1_1       - Just talk TLSv1.1\n");
 	BIO_printf(bio_err," -tls1         - Just talk TLSv1\n");
@@ -518,7 +519,6 @@ static void sv_usage(void)
 	BIO_printf(bio_err," -timeout      - Enable timeouts\n");
 	BIO_printf(bio_err," -mtu          - Set link layer MTU\n");
 	BIO_printf(bio_err," -chain        - Read a certificate chain\n");
-	BIO_printf(bio_err," -no_ssl2      - Just disable SSLv2\n");
 	BIO_printf(bio_err," -no_ssl3      - Just disable SSLv3\n");
 	BIO_printf(bio_err," -no_tls1      - Just disable TLSv1\n");
 	BIO_printf(bio_err," -no_tls1_1    - Just disable TLSv1.1\n");
@@ -1404,11 +1404,7 @@ int MAIN(int argc, char *argv[])
 			{ www=2; }
 		else if	(strcmp(*argv,"-HTTP") == 0)
 			{ www=3; }
-#ifndef OPENSSL_NO_SSL2
-		else if	(strcmp(*argv,"-ssl2") == 0)
-			{ meth=SSLv2_server_method(); }
-#endif
-#ifndef OPENSSL_NO_SSL3
+#ifndef OPENSSL_NO_SSL3_METHOD
 		else if	(strcmp(*argv,"-ssl3") == 0)
 			{ meth=SSLv3_server_method(); }
 #endif
@@ -1763,9 +1759,6 @@ bad:
 		if(strlen(session_id_prefix) >= 32)
 			BIO_printf(bio_err,
 "warning: id_prefix is too long, only one new session will be possible\n");
-		else if(strlen(session_id_prefix) >= 16)
-			BIO_printf(bio_err,
-"warning: id_prefix is too long if you use SSLv2\n");
 		if(!SSL_CTX_set_generate_session_id(ctx, generate_session_id))
 			{
 			BIO_printf(bio_err,"error setting 'id_prefix'\n");
@@ -1850,9 +1843,6 @@ bad:
 			if(strlen(session_id_prefix) >= 32)
 				BIO_printf(bio_err,
 					"warning: id_prefix is too long, only one new session will be possible\n");
-			else if(strlen(session_id_prefix) >= 16)
-				BIO_printf(bio_err,
-					"warning: id_prefix is too long if you use SSLv2\n");
 			if(!SSL_CTX_set_generate_session_id(ctx2, generate_session_id))
 				{
 				BIO_printf(bio_err,"error setting 'id_prefix'\n");
@@ -2297,10 +2287,24 @@ static int sv_body(char *hostname, int s, int stype, unsigned char *context)
 			BIO_ctrl(sbio, BIO_CTRL_DGRAM_SET_SEND_TIMEOUT, 0, &timeout);
 			}
 
-		if (socket_mtu > 28)
+		if (socket_mtu)
 			{
+			if(socket_mtu < DTLS_get_link_min_mtu(con))
+				{
+				BIO_printf(bio_err,"MTU too small. Must be at least %ld\n",
+					DTLS_get_link_min_mtu(con));
+				ret = -1;
+				BIO_free(sbio);
+				goto err;
+				}
 			SSL_set_options(con, SSL_OP_NO_QUERY_MTU);
-			SSL_set_mtu(con, socket_mtu - 28);
+			if(!DTLS_set_link_mtu(con, socket_mtu))
+				{
+				BIO_printf(bio_err, "Failed to set MTU\n");
+				ret = -1;
+				BIO_free(sbio);
+				goto err;
+				}
 			}
 		else
 			/* want to do MTU discovery */

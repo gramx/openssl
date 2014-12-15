@@ -78,7 +78,7 @@ LIBDIR=lib
 # dependent assembler flags. E.g. if you throw -mcpu=ultrasparc at SPARC
 # gcc, then the driver will automatically translate it to -xarch=v8plus
 # and pass it down to assembler.
-#AS=$(CC) -c
+AS=$(CC) -c
 ASFLAG=$(CFLAG)
 
 # For x86 assembler: Set PROCESSOR to 386 if you want to support
@@ -121,15 +121,9 @@ LIBZLIB=
 
 FIPSLIBDIR=/usr/local/ssl/$(LIBDIR)/
 
-# This is set to "y" if fipscanister.o is compiled internally as
-# opposed to coming from an external validated location.
-
-FIPSCANISTERINTERNAL=n
-
 # The location of the library which contains fipscanister.o
-# normally it will be libcrypto unless fipsdso is set in which
-# case it will be libfips. If not compiling in FIPS mode at all
-# this is empty making it a useful test for a FIPS compile.
+# normally it will be libcrypto. If not compiling in FIPS mode
+# at all this is empty making it a useful test for a FIPS compile.
 
 FIPSCANLIB=
 
@@ -138,7 +132,7 @@ FIPSCANLIB=
 
 BASEADDR=
 
-DIRS=   crypto fips ssl engines apps test tools
+DIRS=   crypto ssl engines apps test tools
 ENGDIRS= ccgost
 SHLIBDIRS= crypto ssl
 
@@ -207,7 +201,7 @@ CLEARENV=	TOP= && unset TOP $${LIB+LIB} $${LIBS+LIBS}	\
 
 BUILDENV=	PLATFORM='$(PLATFORM)' PROCESSOR='$(PROCESSOR)' \
 		CC='$(CC)' CFLAG='$(CFLAG)' 			\
-		ASFLAG='$(CFLAG) -c'			\
+		AS='$(CC)' ASFLAG='$(CFLAG) -c'			\
 		AR='$(AR)' NM='$(NM)' RANLIB='$(RANLIB)'	\
 		CROSS_COMPILE='$(CROSS_COMPILE)'	\
 		PERL='$(PERL)' ENGDIRS='$(ENGDIRS)'		\
@@ -238,7 +232,6 @@ BUILDENV=	PLATFORM='$(PLATFORM)' PROCESSOR='$(PROCESSOR)' \
 		PERLASM_SCHEME='$(PERLASM_SCHEME)'		\
 		FIPSLIBDIR='${FIPSLIBDIR}'			\
 		FIPSCANLIB="$${FIPSCANLIB:-$(FIPSCANLIB)}"	\
-		FIPSCANISTERINTERNAL='${FIPSCANISTERINTERNAL}'	\
 		FIPS_EX_OBJ='${FIPS_EX_OBJ}'	\
 		THIS=$${THIS:-$@} MAKEFILE=Makefile MAKEOVERRIDES=
 # MAKEOVERRIDES= effectively "equalizes" GNU-ish and SysV-ish make flavors,
@@ -355,42 +348,30 @@ FIPS_EX_OBJ= ../crypto/aes/aes_cfb.o \
 	../crypto/uid.o
 
 sub_all: build_all
+
 build_all: build_libs build_apps build_tests build_tools
 
-build_libs: build_crypto build_fips build_ssl build_engines
-
-build_fips:
-	@dir=fips; target=all; [ -z "$(FIPSCANLIB)" ] || $(BUILD_ONE_CMD)
+build_libs: build_crypto build_ssl build_engines
 
 build_crypto:
-	if [ -n "$(FIPSCANLIB)" ]; then \
-		EXCL_OBJ='$(AES_ENC) $(BN_ASM) $(EC_ASM) $(DES_ENC) $(CPUID_OBJ) $(SHA1_ASM_OBJ) $(MODES_ASM_OBJ) $(FIPS_EX_OBJ)' ; export EXCL_OBJ ; \
-		ARX='$(PERL) $${TOP}/util/arx.pl $(AR)' ; \
-	else \
-		ARX='${AR}' ; \
-	fi ; export ARX ; \
-	if [ $(FIPSCANISTERINTERNAL) = "y" ]; then \
-		AS='$(PERL) $${TOP}/util/fipsas.pl $${TOP} $${<} $(CC) -c' ; \
-	else \
-		AS='$(CC) -c' ; \
-	fi ; export AS ; \
-		dir=crypto; target=all; $(BUILD_ONE_CMD)
-build_ssl:
+	@dir=crypto; target=all; $(BUILD_ONE_CMD)
+build_ssl: build_crypto
 	@dir=ssl; target=all; $(BUILD_ONE_CMD)
-build_engines:
+build_engines: build_crypto
 	@dir=engines; target=all; AS='$(CC) -c'; export AS; $(BUILD_ONE_CMD)
-build_apps:
+
+build_apps: build_libs
 	@dir=apps; target=all; $(BUILD_ONE_CMD)
-build_tests:
+build_tests: build_libs
 	@dir=test; target=all; $(BUILD_ONE_CMD)
-build_tools:
+build_tools: build_libs
 	@dir=tools; target=all; $(BUILD_ONE_CMD)
 
 all_testapps: build_libs build_testapps
 build_testapps:
 	@dir=crypto; target=testapps; $(BUILD_ONE_CMD)
 
-libcrypto$(SHLIB_EXT): libcrypto.a build_fips
+libcrypto$(SHLIB_EXT): libcrypto.a
 	@if [ "$(SHLIB_TARGET)" != "" ]; then \
 		if [ "$(FIPSCANLIB)" = "libcrypto" ]; then \
 			FIPSLD_CC="$(CC)"; CC=fips/fipsld; \
@@ -497,6 +478,7 @@ libclean:
 
 clean:	libclean
 	rm -f shlib/*.o *.o core a.out fluff rehash.time testlog make.log cctest cctest.c
+	rm -rf *.bak certs/.0
 	@set -e; target=clean; $(RECURSIVE_BUILD_CMD)
 	rm -f $(LIBS) tags TAGS
 	rm -f openssl.pc libssl.pc libcrypto.pc
@@ -519,16 +501,12 @@ links:
 	@$(PERL) $(TOP)/util/mkdir-p.pl include/openssl
 	@$(PERL) $(TOP)/util/mklink.pl include/openssl $(EXHEADER)
 	@set -e; target=links; $(RECURSIVE_BUILD_CMD)
-	@if [ -z "$(FIPSCANLIB)" ]; then \
-		set -e; target=links; dir=fips ; $(BUILD_CMD) ; \
-	fi
 
 gentests:
 	@(cd test && echo "generating dummy tests (if needed)..." && \
 	$(CLEARENV) && $(MAKE) -e $(BUILDENV) TESTS='$(TESTS)' OPENSSL_DEBUG_MEMORY=on generate );
 
 dclean:
-	rm -rf *.bak include/openssl certs/.0
 	@set -e; target=dclean; $(RECURSIVE_BUILD_CMD)
 
 rehash: rehash.time
@@ -740,7 +718,6 @@ install_docs:
 		$(INSTALL_PREFIX)$(MANDIR)/man3 \
 		$(INSTALL_PREFIX)$(MANDIR)/man5 \
 		$(INSTALL_PREFIX)$(MANDIR)/man7
-	@pod2man="`cd ./util; ./pod2mantest $(PERL)`"; \
 	here="`pwd`"; \
 	filecase=; \
 	case "$(PLATFORM)" in DJGPP|Cygwin*|mingw*|darwin*-*-cc) \
@@ -751,9 +728,9 @@ install_docs:
 		sec=`$(PERL) util/extract-section.pl 1 < $$i`; \
 		echo "installing man$$sec/$$fn.$${sec}$(MANSUFFIX)"; \
 		(cd `$(PERL) util/dirname.pl $$i`; \
-		sh -c "$$pod2man \
+		pod2man \
 			--section=$$sec --center=OpenSSL \
-			--release=$(VERSION) `basename $$i`") \
+			--release=$(VERSION) `basename $$i`) \
 			>  $(INSTALL_PREFIX)$(MANDIR)/man$$sec/$$fn.$${sec}$(MANSUFFIX); \
 		$(PERL) util/extract-names.pl < $$i | \
 			(grep -v $$filecase "^$$fn\$$"; true) | \
@@ -768,9 +745,9 @@ install_docs:
 		sec=`$(PERL) util/extract-section.pl 3 < $$i`; \
 		echo "installing man$$sec/$$fn.$${sec}$(MANSUFFIX)"; \
 		(cd `$(PERL) util/dirname.pl $$i`; \
-		sh -c "$$pod2man \
+		pod2man \
 			--section=$$sec --center=OpenSSL \
-			--release=$(VERSION) `basename $$i`") \
+			--release=$(VERSION) `basename $$i`) \
 			>  $(INSTALL_PREFIX)$(MANDIR)/man$$sec/$$fn.$${sec}$(MANSUFFIX); \
 		$(PERL) util/extract-names.pl < $$i | \
 			(grep -v $$filecase "^$$fn\$$"; true) | \

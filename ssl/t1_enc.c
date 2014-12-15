@@ -535,7 +535,6 @@ printf("which = %04X\nmac key=",which);
 			}
 		}
 
-	s->session->key_arg_length=0;
 #ifdef KSSL_DEBUG
 	{
         int i;
@@ -1055,13 +1054,11 @@ int tls1_mac(SSL *ssl, unsigned char *md, int send)
 		EVP_DigestSignUpdate(mac_ctx,rec->input,rec->length);
 		t=EVP_DigestSignFinal(mac_ctx,md,&md_size);
 		OPENSSL_assert(t > 0);
-#ifdef OPENSSL_FIPS
 		if (!send && !SSL_USE_ETM(ssl) && FIPS_mode())
 			tls_fips_digest_extra(
 	    				ssl->enc_read_ctx,
 					mac_ctx, rec->input,
 					rec->length, rec->orig_len);
-#endif
 		}
 		
 	if (!stream_mac)

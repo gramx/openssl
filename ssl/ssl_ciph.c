@@ -314,7 +314,6 @@ static const SSL_CIPHER cipher_aliases[]={
 	{0,SSL_TXT_SHA384,0,    0,0,0,SSL_SHA384,  0,0,0,0,0},
 
 	/* protocol version aliases */
-	{0,SSL_TXT_SSLV2,0,   0,0,0,0,SSL_SSLV2, 0,0,0,0},
 	{0,SSL_TXT_SSLV3,0,   0,0,0,0,SSL_SSLV3, 0,0,0,0},
 	{0,SSL_TXT_TLSV1,0,   0,0,0,0,SSL_TLSV1, 0,0,0,0},
 	{0,SSL_TXT_TLSV1_2,0, 0,0,0,0,SSL_TLSV1_2, 0,0,0,0},
@@ -644,10 +643,8 @@ int ssl_cipher_get_evp(const SSL_SESSION *s, const EVP_CIPHER **enc,
 		    s->ssl_version < TLS1_VERSION)
 			return 1;
 
-#ifdef OPENSSL_FIPS
 		if (FIPS_mode())
 			return 1;
-#endif
 
 		if	(c->algorithm_enc == SSL_RC4 &&
 			 c->algorithm_mac == SSL_MD5 &&
@@ -815,7 +812,7 @@ static void ssl_cipher_collect_ciphers(const SSL_METHOD *ssl_method,
 
 	/*
 	 * We have num_of_ciphers descriptions compiled in, depending on the
-	 * method selected (SSLv2 and/or SSLv3, TLSv1 etc).
+	 * method selected (SSLv3, TLSv1 etc).
 	 * These will later be sorted in a linked list with at most num
 	 * entries.
 	 */
@@ -827,9 +824,7 @@ static void ssl_cipher_collect_ciphers(const SSL_METHOD *ssl_method,
 		c = ssl_method->get_cipher(i);
 		/* drop those that use any of that is not available */
 		if ((c != NULL) && c->valid &&
-#ifdef OPENSSL_FIPS
 		    (!FIPS_mode() || (c->algo_strength & SSL_FIPS)) &&
-#endif
 		    !(c->algorithm_mkey & disabled_mkey) &&
 		    !(c->algorithm_auth & disabled_auth) &&
 		    !(c->algorithm_enc & disabled_enc) &&
@@ -1616,13 +1611,14 @@ STACK_OF(SSL_CIPHER) *ssl_create_cipher_list(const SSL_METHOD *ssl_method,
 	 */
 	for (curr = head; curr != NULL; curr = curr->next)
 		{
-#ifdef OPENSSL_FIPS
 		if (curr->active && (!FIPS_mode() || curr->cipher->algo_strength & SSL_FIPS))
-#else
-		if (curr->active)
-#endif
 			{
-			sk_SSL_CIPHER_push(cipherstack, curr->cipher);
+			if (!sk_SSL_CIPHER_push(cipherstack, curr->cipher))
+				{
+				OPENSSL_free(co_list);
+				sk_SSL_CIPHER_free(cipherstack);
+				return NULL;
+				}
 #ifdef CIPHER_DEBUG
 			printf("<%s>\n",curr->cipher->name);
 #endif
@@ -1653,7 +1649,7 @@ char *SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 	int is_export,pkl,kl;
 	const char *ver,*exp_str;
 	const char *kx,*au,*enc,*mac;
-	unsigned long alg_mkey,alg_auth,alg_enc,alg_mac,alg_ssl,alg2;
+	unsigned long alg_mkey,alg_auth,alg_enc,alg_mac,alg_ssl;
 #ifdef KSSL_DEBUG
 	static const char *format="%-23s %s Kx=%-8s Au=%-4s Enc=%-9s Mac=%-4s%s AL=%lx/%lx/%lx/%lx/%lx\n";
 #else
@@ -1666,16 +1662,12 @@ char *SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 	alg_mac = cipher->algorithm_mac;
 	alg_ssl = cipher->algorithm_ssl;
 
-	alg2=cipher->algorithm2;
-
 	is_export=SSL_C_IS_EXPORT(cipher);
 	pkl=SSL_C_EXPORT_PKEYLENGTH(cipher);
 	kl=SSL_C_EXPORT_KEYLENGTH(cipher);
 	exp_str=is_export?" export":"";
 	
-	if (alg_ssl & SSL_SSLV2)
-		ver="SSLv2";
-	else if (alg_ssl & SSL_SSLV3)
+	if (alg_ssl & SSL_SSLV3)
 		ver="SSLv3";
 	else if (alg_ssl & SSL_TLSV1_2)
 		ver="TLSv1.2";
@@ -1770,8 +1762,7 @@ char *SSL_CIPHER_description(const SSL_CIPHER *cipher, char *buf, int len)
 		enc="3DES(168)";
 		break;
 	case SSL_RC4:
-		enc=is_export?(kl == 5 ? "RC4(40)" : "RC4(56)")
-		  :((alg2&SSL2_CF_8_BYTE_ENC)?"RC4(64)":"RC4(128)");
+		enc=is_export?(kl == 5 ? "RC4(40)" : "RC4(56)"):"RC4(128)";
 		break;
 	case SSL_RC2:
 		enc=is_export?(kl == 5 ? "RC2(40)" : "RC2(56)"):"RC2(128)";
@@ -1864,8 +1855,6 @@ char *SSL_CIPHER_get_version(const SSL_CIPHER *c)
 	i=(int)(c->id>>24L);
 	if (i == 3)
 		return("TLSv1/SSLv3");
-	else if (i == 2)
-		return("SSLv2");
 	else
 		return("unknown");
 	}
@@ -1973,6 +1962,13 @@ int SSL_COMP_add_compression_method(int id, COMP_METHOD *cm)
 
 	MemCheck_off();
 	comp=(SSL_COMP *)OPENSSL_malloc(sizeof(SSL_COMP));
+	if (comp == NULL)
+		{
+		MemCheck_on();
+		SSLerr(SSL_F_SSL_COMP_ADD_COMPRESSION_METHOD,ERR_R_MALLOC_FAILURE);
+		return(1);
+		}
+
 	comp->id=id;
 	comp->method=cm;
 	load_builtin_compressions();

@@ -11,6 +11,7 @@
 #include <openssl/rand.h>
 #include <openssl/bn.h>
 #include <openssl/dsa.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 
 #include "gost_params.h"
@@ -58,7 +59,7 @@ DSA_SIG *gost_do_sign(const unsigned char *dgst,int dlen, DSA *dsa)
 	BN_CTX_start(ctx);
 	if (!newsig)
 		{
-		GOSTerr(GOST_F_GOST_DO_SIGN,GOST_R_NO_MEMORY);
+		GOSTerr(GOST_F_GOST_DO_SIGN,ERR_R_MALLOC_FAILURE);
 		goto err;
 		}	
 	tmp=BN_CTX_get(ctx);
@@ -254,7 +255,7 @@ DSA_SIG *unpack_cc_signature(const unsigned char *sig,size_t siglen)
 	s = DSA_SIG_new();
 	if (s == NULL)
 		{
-		GOSTerr(GOST_F_UNPACK_CC_SIGNATURE,GOST_R_NO_MEMORY);
+		GOSTerr(GOST_F_UNPACK_CC_SIGNATURE,ERR_R_MALLOC_FAILURE);
 		return(NULL);
 		}
 	s->r = getbnfrombuf(sig, siglen/2);
@@ -270,7 +271,7 @@ DSA_SIG *unpack_cp_signature(const unsigned char *sig,size_t siglen)
 	s = DSA_SIG_new();
 	if (s == NULL)
 		{
-		GOSTerr(GOST_F_UNPACK_CP_SIGNATURE,GOST_R_NO_MEMORY);
+		GOSTerr(GOST_F_UNPACK_CP_SIGNATURE,ERR_R_MALLOC_FAILURE);
 		return NULL;
 		}
 	s->s = getbnfrombuf(sig , siglen/2);

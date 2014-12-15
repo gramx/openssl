@@ -112,11 +112,160 @@
 #ifndef HEADER_BN_LCL_H
 #define HEADER_BN_LCL_H
 
-#include <openssl/bn.h>
+#include "internal/bn_int.h"
 
 #ifdef  __cplusplus
 extern "C" {
 #endif
+
+/* Bignum consistency macros
+ * There is one "API" macro, bn_fix_top(), for stripping leading zeroes from
+ * bignum data after direct manipulations on the data. There is also an
+ * "internal" macro, bn_check_top(), for verifying that there are no leading
+ * zeroes. Unfortunately, some auditing is required due to the fact that
+ * bn_fix_top() has become an overabused duct-tape because bignum data is
+ * occasionally passed around in an inconsistent state. So the following
+ * changes have been made to sort this out;
+ * - bn_fix_top()s implementation has been moved to bn_correct_top()
+ * - if BN_DEBUG isn't defined, bn_fix_top() maps to bn_correct_top(), and
+ *   bn_check_top() is as before.
+ * - if BN_DEBUG *is* defined;
+ *   - bn_check_top() tries to pollute unused words even if the bignum 'top' is
+ *     consistent. (ed: only if BN_DEBUG_RAND is defined)
+ *   - bn_fix_top() maps to bn_check_top() rather than "fixing" anything.
+ * The idea is to have debug builds flag up inconsistent bignums when they
+ * occur. If that occurs in a bn_fix_top(), we examine the code in question; if
+ * the use of bn_fix_top() was appropriate (ie. it follows directly after code
+ * that manipulates the bignum) it is converted to bn_correct_top(), and if it
+ * was not appropriate, we convert it permanently to bn_check_top() and track
+ * down the cause of the bug. Eventually, no internal code should be using the
+ * bn_fix_top() macro. External applications and libraries should try this with
+ * their own code too, both in terms of building against the openssl headers
+ * with BN_DEBUG defined *and* linking with a version of OpenSSL built with it
+ * defined. This not only improves external code, it provides more test
+ * coverage for openssl's own code.
+ */
+
+#ifdef BN_DEBUG
+
+/* We only need assert() when debugging */
+#include <assert.h>
+
+#ifdef BN_DEBUG_RAND
+/* To avoid "make update" cvs wars due to BN_DEBUG, use some tricks */
+#ifndef RAND_pseudo_bytes
+int RAND_pseudo_bytes(unsigned char *buf,int num);
+#define BN_DEBUG_TRIX
+#endif
+#define bn_pollute(a) \
+	do { \
+		const BIGNUM *_bnum1 = (a); \
+		if(_bnum1->top < _bnum1->dmax) { \
+			unsigned char _tmp_char; \
+			/* We cast away const without the compiler knowing, any \
+			 * *genuinely* constant variables that aren't mutable \
+			 * wouldn't be constructed with top!=dmax. */ \
+			BN_ULONG *_not_const; \
+			memcpy(&_not_const, &_bnum1->d, sizeof(BN_ULONG*)); \
+			RAND_pseudo_bytes(&_tmp_char, 1); \
+			memset((unsigned char *)(_not_const + _bnum1->top), _tmp_char, \
+				(_bnum1->dmax - _bnum1->top) * sizeof(BN_ULONG)); \
+		} \
+	} while(0)
+#ifdef BN_DEBUG_TRIX
+#undef RAND_pseudo_bytes
+#endif
+#else
+#define bn_pollute(a)
+#endif
+#define bn_check_top(a) \
+	do { \
+		const BIGNUM *_bnum2 = (a); \
+		if (_bnum2 != NULL) { \
+			assert((_bnum2->top == 0) || \
+				(_bnum2->d[_bnum2->top - 1] != 0)); \
+			bn_pollute(_bnum2); \
+		} \
+	} while(0)
+
+#define bn_fix_top(a)		bn_check_top(a)
+
+#define bn_check_size(bn, bits) bn_wcheck_size(bn, ((bits+BN_BITS2-1))/BN_BITS2)
+#define bn_wcheck_size(bn, words) \
+	do { \
+		const BIGNUM *_bnum2 = (bn); \
+		assert((words) <= (_bnum2)->dmax && (words) >= (_bnum2)->top); \
+		/* avoid unused variable warning with NDEBUG */ \
+		(void)(_bnum2); \
+	} while(0)
+
+#else /* !BN_DEBUG */
+
+#define bn_pollute(a)
+#define bn_check_top(a)
+#define bn_fix_top(a)		bn_correct_top(a)
+#define bn_check_size(bn, bits)
+#define bn_wcheck_size(bn, words)
+
+#endif
+
+
+BN_ULONG bn_mul_add_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w);
+BN_ULONG bn_mul_words(BN_ULONG *rp, const BN_ULONG *ap, int num, BN_ULONG w);
+void     bn_sqr_words(BN_ULONG *rp, const BN_ULONG *ap, int num);
+BN_ULONG bn_div_words(BN_ULONG h, BN_ULONG l, BN_ULONG d);
+BN_ULONG bn_add_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,int num);
+BN_ULONG bn_sub_words(BN_ULONG *rp, const BN_ULONG *ap, const BN_ULONG *bp,int num);
+
+
+struct bignum_st
+	{
+	BN_ULONG *d;	/* Pointer to an array of 'BN_BITS2' bit chunks. */
+	int top;	/* Index of last used d +1. */
+	/* The next are internal book keeping for bn_expand. */
+	int dmax;	/* Size of the d array. */
+	int neg;	/* one if the number is negative */
+	int flags;
+	};
+
+/* Used for montgomery multiplication */
+struct bn_mont_ctx_st
+	{
+	int ri;        /* number of bits in R */
+	BIGNUM RR;     /* used to convert to montgomery form */
+	BIGNUM N;      /* The modulus */
+	BIGNUM Ni;     /* R*(1/R mod N) - N*Ni = 1
+	                * (Ni is only stored for bignum algorithm) */
+	BN_ULONG n0[2];/* least significant word(s) of Ni;
+	                  (type changed with 0.9.9, was "BN_ULONG n0;" before) */
+	int flags;
+	};
+
+/* Used for reciprocal division/mod functions
+ * It cannot be shared between threads
+ */
+struct bn_recp_ctx_st
+	{
+	BIGNUM N;	/* the divisor */
+	BIGNUM Nr;	/* the reciprocal */
+	int num_bits;
+	int shift;
+	int flags;
+	};
+
+/* Used for slow "generation" functions. */
+struct bn_gencb_st
+	{
+	unsigned int ver;	/* To handle binary (in)compatibility */
+	void *arg;		/* callback-specific data */
+	union
+		{
+		/* if(ver==1) - handles old style callbacks */
+		void (*cb_1)(int, int, void *);
+		/* if(ver==2) - new callback style */
+		int (*cb_2)(int, int, BN_GENCB *);
+		} cb;
+	};
 
 
 /*
@@ -505,6 +654,10 @@ extern "C" {
 	(r)=l&BN_MASK2; \
 	}
 #endif /* !BN_LLONG */
+
+void BN_init(BIGNUM *a);
+void BN_RECP_CTX_init(BN_RECP_CTX *recp);
+void BN_MONT_CTX_init(BN_MONT_CTX *ctx);
 
 void bn_mul_normal(BN_ULONG *r,BN_ULONG *a,int na,BN_ULONG *b,int nb);
 void bn_mul_comba8(BN_ULONG *r,BN_ULONG *a,BN_ULONG *b);

@@ -11,6 +11,7 @@
 #include <string.h>
 #include <openssl/dh.h>
 #include <openssl/rand.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/objects.h>
 
@@ -199,7 +200,7 @@ int pkey_GOST94cp_encrypt(EVP_PKEY_CTX *ctx, unsigned char *out, size_t *outlen,
 			EVP_PKEY_free(mykey);
 		}	
 	GOSTerr(GOST_F_PKEY_GOST94CP_ENCRYPT,
-		GOST_R_MALLOC_FAILURE);
+		ERR_R_MALLOC_FAILURE);
 	err:		
 	GOST_KEY_TRANSPORT_free(gkt);
 	return -1;
@@ -288,4 +289,3 @@ err:
 	GOST_KEY_TRANSPORT_free(gkt);
 	return -1;
 	}	
-

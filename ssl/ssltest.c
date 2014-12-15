@@ -773,10 +773,7 @@ static void sv_usage(void)
 	fprintf(stderr," -srpuser user  - SRP username to use\n");
 	fprintf(stderr," -srppass arg   - password for 'user'\n");
 #endif
-#ifndef OPENSSL_NO_SSL2
-	fprintf(stderr," -ssl2         - use SSLv2\n");
-#endif
-#ifndef OPENSSL_NO_SSL3
+#ifndef OPENSSL_NO_SSL3_METHOD
 	fprintf(stderr," -ssl3         - use SSLv3\n");
 #endif
 #ifndef OPENSSL_NO_TLS1
@@ -816,10 +813,52 @@ static void sv_usage(void)
 	fprintf(stderr," -alpn_expected <string> - the ALPN protocol that should be negotiated\n");
 	}
 
+static void print_key_details(BIO *out, EVP_PKEY *key)
+	{
+	int keyid = EVP_PKEY_id(key);
+#ifndef OPENSSL_NO_EC
+	if (keyid == EVP_PKEY_EC)
+		{
+		EC_KEY *ec = EVP_PKEY_get1_EC_KEY(key);
+		int nid;
+		const char *cname;
+		nid = EC_GROUP_get_curve_name(EC_KEY_get0_group(ec));
+		EC_KEY_free(ec);
+		cname = EC_curve_nid2nist(nid);
+		if (!cname)
+			cname = OBJ_nid2sn(nid);
+		BIO_printf(out, "%d bits EC (%s)",
+						EVP_PKEY_bits(key), cname);
+		}
+	else
+#endif
+		{
+		const char *algname;
+		switch (keyid)
+			{
+		case EVP_PKEY_RSA:
+			algname = "RSA";
+			break;
+		case EVP_PKEY_DSA:
+			algname = "DSA";
+			break;
+		case EVP_PKEY_DH:
+			algname = "DH";
+			break;
+		default:
+			algname = OBJ_nid2sn(keyid);
+			break;
+			}
+		BIO_printf(out, "%d bits %s", EVP_PKEY_bits(key), algname);
+		}
+	}
+
 static void print_details(SSL *c_ssl, const char *prefix)
 	{
 	const SSL_CIPHER *ciph;
+	int mdnid;
 	X509 *cert;
+	EVP_PKEY *pkey;
 		
 	ciph=SSL_get_current_cipher(c_ssl);
 	BIO_printf(bio_stdout,"%s%s, cipher %s %s",
@@ -830,33 +869,23 @@ static void print_details(SSL *c_ssl, const char *prefix)
 	cert=SSL_get_peer_certificate(c_ssl);
 	if (cert != NULL)
 		{
-		EVP_PKEY *pkey = X509_get_pubkey(cert);
+		pkey = X509_get_pubkey(cert);
 		if (pkey != NULL)
 			{
-			if (0) 
-				;
-#ifndef OPENSSL_NO_RSA
-			else if (pkey->type == EVP_PKEY_RSA && pkey->pkey.rsa != NULL
-				&& pkey->pkey.rsa->n != NULL)
-				{
-				BIO_printf(bio_stdout, ", %d bit RSA",
-					BN_num_bits(pkey->pkey.rsa->n));
-				}
-#endif
-#ifndef OPENSSL_NO_DSA
-			else if (pkey->type == EVP_PKEY_DSA && pkey->pkey.dsa != NULL
-				&& pkey->pkey.dsa->p != NULL)
-				{
-				BIO_printf(bio_stdout, ", %d bit DSA",
-					BN_num_bits(pkey->pkey.dsa->p));
-				}
-#endif
+			BIO_puts(bio_stdout, ", ");
+			print_key_details(bio_stdout, pkey);
 			EVP_PKEY_free(pkey);
 			}
 		X509_free(cert);
 		}
-	/* The SSL API does not allow us to look at temporary RSA/DH keys,
-	 * otherwise we should print their lengths too */
+	if (SSL_get_server_tmp_key(c_ssl, &pkey))
+		{
+		BIO_puts(bio_stdout, ", temp key: ");
+		print_key_details(bio_stdout, pkey);
+		EVP_PKEY_free(pkey);
+		}
+        if (SSL_get_peer_signature_nid(c_ssl, &mdnid))
+                BIO_printf(bio_stdout, ", digest=%s", OBJ_nid2sn(mdnid));
 	BIO_printf(bio_stdout,"\n");
 	}
 
@@ -949,7 +978,7 @@ int main(int argc, char *argv[])
 	int badop=0;
 	int bio_pair=0;
 	int force=0;
-	int tls1=0,ssl2=0,ssl3=0,ret=1;
+	int tls1=0,ssl3=0,ret=1;
 	int client_auth=0;
 	int server_auth=0,i;
 	struct app_verify_arg app_verify_arg =
@@ -996,6 +1025,10 @@ int main(int argc, char *argv[])
 #endif
         int no_protocol = 0;
 
+	SSL_CONF_CTX *s_cctx = NULL, *c_cctx = NULL;
+	STACK_OF(OPENSSL_STRING) *conf_args = NULL;
+	const char *arg = NULL, *argn = NULL;
+
 	verbose = 0;
 	debug = 0;
 	cipher = 0;
@@ -1020,6 +1053,31 @@ int main(int argc, char *argv[])
 	RAND_seed(rnd_seed, sizeof rnd_seed);
 
 	bio_stdout=BIO_new_fp(stdout,BIO_NOCLOSE|BIO_FP_TEXT);
+
+	s_cctx = SSL_CONF_CTX_new();
+	c_cctx = SSL_CONF_CTX_new();
+
+	if (!s_cctx || !c_cctx)
+		{
+		ERR_print_errors(bio_err);
+		goto end;
+		}
+
+	SSL_CONF_CTX_set_flags(s_cctx,
+			       SSL_CONF_FLAG_CMDLINE|SSL_CONF_FLAG_SERVER);
+	if (!SSL_CONF_CTX_set1_prefix(s_cctx, "-s_"))
+		{
+		ERR_print_errors(bio_err);
+		goto end;
+		}
+
+	SSL_CONF_CTX_set_flags(c_cctx,
+			       SSL_CONF_FLAG_CMDLINE|SSL_CONF_FLAG_CLIENT);
+	if (!SSL_CONF_CTX_set1_prefix(c_cctx, "-c_"))
+		{
+		ERR_print_errors(bio_err);
+		goto end;
+		}
 
 	argc--;
 	argv++;
@@ -1103,13 +1161,6 @@ int main(int argc, char *argv[])
 			tls1=1;
 			}
 #endif
-		else if	(strcmp(*argv,"-ssl2") == 0)
-			{
-#ifdef OPENSSL_NO_SSL2
-			no_protocol = 1;
-#endif
-			ssl2 = 1;
-			}
 		else if	(strcmp(*argv,"-tls1") == 0)
 			{
 #ifdef OPENSSL_NO_TLS1
@@ -1119,7 +1170,7 @@ int main(int argc, char *argv[])
 			}
 		else if	(strcmp(*argv,"-ssl3") == 0)
 			{
-#ifdef OPENSSL_NO_SSL3
+#ifdef OPENSSL_NO_SSL3_METHOD
 			no_protocol = 1;
 #endif
 			ssl3 = 1;
@@ -1276,8 +1327,40 @@ int main(int argc, char *argv[])
 			}
 		else
 			{
-			fprintf(stderr,"unknown option %s\n",*argv);
-			badop=1;
+			int rv;
+			arg = argv[0];
+			argn = argv[1];
+			/* Try to process command using SSL_CONF */
+			rv = SSL_CONF_cmd_argv(c_cctx, &argc, &argv);
+			/* If not processed try server */
+			if (rv == 0)
+				rv = SSL_CONF_cmd_argv(s_cctx, &argc, &argv);
+			/* Recognised: store it for later use */
+			if (rv > 0)
+				{
+				if (rv == 1)
+					argn = NULL;
+				if (!conf_args)
+					{
+					conf_args = sk_OPENSSL_STRING_new_null();
+					if (!conf_args)
+						goto end;
+					}
+				if (!sk_OPENSSL_STRING_push(conf_args, arg))
+					goto end;
+				if (!sk_OPENSSL_STRING_push(conf_args, argn))
+					goto end;
+				continue;
+				}
+			if (rv == -3)
+				BIO_printf(bio_err, "Missing argument for %s\n",
+									arg);
+			else if (rv < 0)
+				BIO_printf(bio_err, "Error with command %s\n",
+									arg);
+			else if (rv == 0)
+				BIO_printf(bio_err,"unknown option %s\n", arg);
+			badop = 1;
 			break;
 			}
 		argc--;
@@ -1305,15 +1388,15 @@ bad:
 		goto end;
 		}
 
-	if (ssl2 + ssl3 + tls1 > 1)
+	if (ssl3 + tls1 > 1)
 		{
-		fprintf(stderr, "At most one of -ssl2, -ssl3, or -tls1 should "
+		fprintf(stderr, "At most one of -ssl3, or -tls1 should "
 			"be requested.\n");
 		EXIT(1);
 		}
 
 	/*
-	 * Testing was requested for a compiled-out protocol (e.g. SSLv2).
+	 * Testing was requested for a compiled-out protocol (e.g. SSLv3).
          * Ideally, we would error out, but the generic test wrapper can't know
 	 * when to expect failure. So we do nothing and return success.
 	 */
@@ -1325,11 +1408,11 @@ bad:
 		goto end;
 		}
 
-	if (!ssl2 && !ssl3 && !tls1 && number > 1 && !reuse && !force)
+	if (!ssl3 && !tls1 && number > 1 && !reuse && !force)
 		{
 		fprintf(stderr, "This case cannot work.  Use -f to perform "
 			"the test anyway (and\n-d to see what happens), "
-			"or add one of -ssl2, -ssl3, -tls1, -reuse\n"
+			"or add one of -ssl3, -tls1, -reuse\n"
 			"to avoid protocol mismatch.\n");
 		EXIT(1);
 		}
@@ -1403,14 +1486,9 @@ bad:
 	}
 #endif
 
-/* At this point, ssl2/ssl3/tls1 is only set if the protocol is available.
+/* At this point, ssl3/tls1 is only set if the protocol is available.
  * (Otherwise we exit early.)
  * However the compiler doesn't know this, so we ifdef. */
-#ifndef OPENSSL_NO_SSL2
-	if (ssl2)
-		meth=SSLv2_method();
-	else
-#endif
 #ifndef OPENSSL_NO_SSL3
 	if (ssl3)
 		meth=SSLv3_method();
@@ -1440,6 +1518,35 @@ bad:
 		{
 		SSL_CTX_set_cipher_list(c_ctx,cipher);
 		SSL_CTX_set_cipher_list(s_ctx,cipher);
+		}
+
+	/* Process SSL_CONF arguments */
+	SSL_CONF_CTX_set_ssl_ctx(c_cctx, c_ctx);
+	SSL_CONF_CTX_set_ssl_ctx(s_cctx, s_ctx);
+
+	for (i = 0; i < sk_OPENSSL_STRING_num(conf_args); i += 2)
+		{
+		int rv;
+		arg = sk_OPENSSL_STRING_value(conf_args, i);
+		argn = sk_OPENSSL_STRING_value(conf_args, i + 1);
+		rv = SSL_CONF_cmd(c_cctx, arg, argn);
+		/* If not recognised use server context */
+		if (rv == -2)
+			rv = SSL_CONF_cmd(s_cctx, arg, argn);
+		if (rv <= 0)
+			{
+			BIO_printf(bio_err, "Error processing %s %s\n",
+						arg, argn ? argn : "");
+			ERR_print_errors(bio_err);
+			goto end;
+			}
+		}
+
+	if (!SSL_CONF_CTX_finish(s_cctx) || !SSL_CONF_CTX_finish(c_cctx))
+		{
+		BIO_puts(bio_err, "Error finishing context\n");
+		ERR_print_errors(bio_err);
+		goto end;
 		}
 
 #ifndef OPENSSL_NO_DH
@@ -1761,6 +1868,12 @@ bad:
 end:
 	if (s_ctx != NULL) SSL_CTX_free(s_ctx);
 	if (c_ctx != NULL) SSL_CTX_free(c_ctx);
+
+	if (s_cctx)
+		SSL_CONF_CTX_free(s_cctx);
+	if (c_cctx)
+		SSL_CONF_CTX_free(c_cctx);
+	sk_OPENSSL_STRING_free(conf_args);
 
 	if (bio_stdout != NULL) BIO_free(bio_stdout);
 
@@ -2124,18 +2237,6 @@ int doit_biopair(SSL *s_ssl, SSL *c_ssl, long count,
 				if (cw_num > 0 || cr_num > 0 || sw_num > 0 || sr_num > 0)
 					{
 					fprintf(stderr, "ERROR: got stuck\n");
-					if (strcmp("SSLv2", SSL_get_version(c_ssl)) == 0)
-						{
-						fprintf(stderr, "This can happen for SSL2 because "
-							"CLIENT-FINISHED and SERVER-VERIFY are written \n"
-							"concurrently ...");
-						if (strncmp("2SCF", SSL_state_string(c_ssl), 4) == 0
-							&& strncmp("2SSV", SSL_state_string(s_ssl), 4) == 0)
-							{
-							fprintf(stderr, " ok.\n");
-							goto end;
-							}
-						}
 					fprintf(stderr, " ERROR.\n");
 					goto err;
 					}
@@ -3219,21 +3320,6 @@ static int do_test_cipherlist(void)
 	const SSL_METHOD *meth;
 	const SSL_CIPHER *ci, *tci = NULL;
 
-#ifndef OPENSSL_NO_SSL2
-	fprintf(stderr, "testing SSLv2 cipher list order: ");
-	meth = SSLv2_method();
-	while ((ci = meth->get_cipher(i++)) != NULL)
-		{
-		if (tci != NULL)
-			if (ci->id >= tci->id)
-				{
-				fprintf(stderr, "failed %lx vs. %lx\n", ci->id, tci->id);
-				return 0;
-				}
-		tci = ci;
-		}
-	fprintf(stderr, "ok\n");
-#endif
 #ifndef OPENSSL_NO_SSL3
 	fprintf(stderr, "testing SSLv3 cipher list order: ");
 	meth = SSLv3_method();

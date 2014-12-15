@@ -61,7 +61,7 @@
 #include "cryptlib.h"
 #include <openssl/objects.h>
 #include <openssl/evp.h>
-#include <openssl/bn.h>
+#include "internal/bn_int.h"
 #include "evp_locl.h"
 
 int EVP_PKEY_paramgen_init(EVP_PKEY_CTX *ctx)
@@ -178,7 +178,7 @@ EVP_PKEY_gen_cb *EVP_PKEY_CTX_get_cb(EVP_PKEY_CTX *ctx)
 
 static int trans_cb(int a, int b, BN_GENCB *gcb)
 	{
-	EVP_PKEY_CTX *ctx = gcb->arg;
+	EVP_PKEY_CTX *ctx = BN_GENCB_get_arg(gcb);
 	ctx->keygen_info[0] = a;
 	ctx->keygen_info[1] = b;
 	return ctx->pkey_gencb(ctx);
@@ -186,7 +186,7 @@ static int trans_cb(int a, int b, BN_GENCB *gcb)
 
 void evp_pkey_set_cb_translate(BN_GENCB *cb, EVP_PKEY_CTX *ctx)
 	{
-	BN_GENCB_set(cb, trans_cb, ctx)
+	BN_GENCB_set(cb, trans_cb, ctx);
 	}
 
 int EVP_PKEY_CTX_get_keygen_info(EVP_PKEY_CTX *ctx, int idx)

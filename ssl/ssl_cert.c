@@ -294,35 +294,6 @@ CERT *ssl_cert_dup(CERT *cert)
 			rpk->privatekey = cpk->privatekey;
 			CRYPTO_add(&cpk->privatekey->references, 1,
 				CRYPTO_LOCK_EVP_PKEY);
-
-			switch(i) 
-				{
-				/* If there was anything special to do for
-				 * certain types of keys, we'd do it here.
-				 * (Nothing at the moment, I think.) */
-
-			case SSL_PKEY_RSA_ENC:
-			case SSL_PKEY_RSA_SIGN:
-				/* We have an RSA key. */
-				break;
-				
-			case SSL_PKEY_DSA_SIGN:
-				/* We have a DSA key. */
-				break;
-				
-			case SSL_PKEY_DH_RSA:
-			case SSL_PKEY_DH_DSA:
-				/* We have a DH key. */
-				break;
-
-			case SSL_PKEY_ECC:
-				/* We have an ECC key */
-				break;
-
-			default:
-				/* Can't happen. */
-				SSLerr(SSL_F_SSL_CERT_DUP, SSL_R_LIBRARY_BUG);
-				}
 			}
 
 		if (cpk->chain)
@@ -344,7 +315,7 @@ CERT *ssl_cert_dup(CERT *cert)
 			if (ret->pkeys[i].serverinfo == NULL)
 				{
 				SSLerr(SSL_F_SSL_CERT_DUP, ERR_R_MALLOC_FAILURE);
-				return NULL;
+				goto err;
 				}
 			ret->pkeys[i].serverinfo_length =
 				cert->pkeys[i].serverinfo_length;
@@ -432,28 +403,8 @@ CERT *ssl_cert_dup(CERT *cert)
 
 	return(ret);
 	
-#if !defined(OPENSSL_NO_DH) || !defined(OPENSSL_NO_ECDH)
 err:
-#endif
-#ifndef OPENSSL_NO_RSA
-	if (ret->rsa_tmp != NULL)
-		RSA_free(ret->rsa_tmp);
-#endif
-#ifndef OPENSSL_NO_DH
-	if (ret->dh_tmp != NULL)
-		DH_free(ret->dh_tmp);
-#endif
-#ifndef OPENSSL_NO_ECDH
-	if (ret->ecdh_tmp != NULL)
-		EC_KEY_free(ret->ecdh_tmp);
-#endif
-
-#ifndef OPENSSL_NO_TLSEXT
-	custom_exts_free(&ret->cli_ext);
-	custom_exts_free(&ret->srv_ext);
-#endif
-
-	ssl_cert_clear_certs(ret);
+	ssl_cert_free(ret);
 
 	return NULL;
 	}
@@ -1418,9 +1369,6 @@ static int ssl_security_default_callback(SSL *s, SSL_CTX *ctx, int op, int bits,
 		/* No ciphers below security level */
 		if (bits < minbits)
 			return 0;
-		/* No SSLv2 ciphers */
-		if ((SSL_CIPHER_get_id(c) >> 24) == 0x2)
-			return 0;
 		/* No unauthenticated ciphersuites */
 		if (c->algorithm_auth & SSL_aNULL)
 			return 0;
@@ -1439,9 +1387,6 @@ static int ssl_security_default_callback(SSL *s, SSL_CTX *ctx, int op, int bits,
 		break;
 		}
 	case SSL_SECOP_VERSION:
-		/* SSLv2 allowed only on level zero */
-		if (nid == SSL2_VERSION)
-			return 0;
 		/* SSLv3 not allowed on level 2 */
 		if (nid <= SSL3_VERSION && level >= 2)
 			return 0;
@@ -1461,9 +1406,6 @@ static int ssl_security_default_callback(SSL *s, SSL_CTX *ctx, int op, int bits,
 		if (level >= 3)
 			return 0;
 		break;
-	case SSL_SECOP_SSL2_COMPAT:
-		/* SSLv2 compatible client hello only for level zero */
-		return 0;
 	default:
 		if (bits < minbits)
 			return 0;
